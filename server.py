@@ -354,7 +354,7 @@ def generate_speech(
         f"  1. Generating Speech…\n"
         f"  2. Syncing words…\n"
         f"  3. Karaoke Ready (browser opens automatically)\n\n"
-        f"WAV:    {wav_path}\n"
+        f"Audio:  {wav_path}\n"
         f"Player: {html_path}\n\n"
         f"Do not wait or poll — let the user know it's underway."
     )
