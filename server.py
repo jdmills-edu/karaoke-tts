@@ -11,7 +11,6 @@ import json
 import re
 import subprocess
 import threading
-import wave
 from datetime import datetime
 from pathlib import Path
 
@@ -176,7 +175,7 @@ def make_output_paths(config: dict) -> tuple[Path, Path]:
     output_dir = resolve(config["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
     stem = f"tts_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    return output_dir / f"{stem}.wav", output_dir / f"{stem}.html"
+    return output_dir / f"{stem}.ogg", output_dir / f"{stem}.html"
 
 
 def chunk_text(text: str, max_chars: int = 800) -> list[str]:
@@ -205,12 +204,7 @@ def generate_piper(text: str, voice: str, out_path: Path) -> None:
     if not chunks:
         raise RuntimeError("Piper produced no audio output")
     audio = np.concatenate([c.audio_float_array for c in chunks])
-    pcm = (audio * 32767).astype(np.int16)
-    with wave.open(str(out_path), "w") as wf:
-        wf.setnchannels(chunks[0].sample_channels)
-        wf.setsampwidth(chunks[0].sample_width)
-        wf.setframerate(chunks[0].sample_rate)
-        wf.writeframes(pcm.tobytes())
+    sf.write(str(out_path), audio, chunks[0].sample_rate)
 
 
 def generate_kokoro(text: str, voice: str, out_path: Path, config: dict) -> None:

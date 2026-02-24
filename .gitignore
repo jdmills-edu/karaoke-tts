@@ -11,6 +11,7 @@ models/
 
 # Generated audio and player files
 *.wav
+*.ogg
 *.mp3
 *.html
 
