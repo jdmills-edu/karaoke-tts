@@ -281,6 +281,25 @@ def generate_speech(
     available voices and confirm which engine and voice to use before
     calling this tool. engine and voice are required — do not omit them.
 
+    IMPORTANT: Before passing text to this tool, rewrite it to be
+    TTS-friendly. Apply ALL of the following transformations:
+      - Em dashes (—) and spaced hyphens ( - ) → comma or period for a natural pause
+      - Hyphens in compound words → space (e.g. "well-known" → "well known")
+      - % → "percent"
+      - $ → "dollars" (e.g. "$1.5M" → "1.5 million dollars")
+      - & → "and"
+      - @ → "at"
+      - # (number sign) → "number"
+      - / (as a separator) → "or" or "and" depending on context
+      - Large numbers → spoken form (e.g. 1,200,000 → "1.2 million",
+        42,300 → "42 thousand 300", 9.5 → "nine point five")
+      - Ordinals → spoken form (e.g. "1st" → "first", "3rd" → "third")
+      - Acronyms that should be spelled out → spaced letters
+        (e.g. "AI" → "A.I.", "GDP" → "G.D.P.")
+      - URLs and email addresses → omit or replace with a short description
+      - Markdown formatting (**, *, #, >, ---) → remove entirely
+      - Parenthetical asides → replace parens with commas
+
     This tool returns immediately. Three stages run in the background:
       1. TTS synthesis (Piper or Kokoro)
       2. Word-timestamp extraction (faster-whisper)
@@ -289,12 +308,12 @@ def generate_speech(
     tell the user generation is underway and they'll be notified.
 
     Args:
-        text: Text to synthesize. Any length is supported.
+        text: TTS-friendly text to synthesize. Any length is supported.
         engine: TTS engine — must be "piper" or "kokoro".
         voice: Voice identifier (required).
                Piper: path to a .onnx model file.
                Kokoro: voice name (e.g. "af_heart", "am_michael").
-        output_path: Optional custom path for the WAV file.
+        output_path: Optional custom path for the OGG file.
                      The HTML player is saved alongside it automatically.
 
     Returns:
