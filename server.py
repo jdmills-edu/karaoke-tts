@@ -347,7 +347,7 @@ def generate_speech(
         except Exception as e:
             notify("Speech Failed", str(e))
 
-    threading.Thread(target=run, daemon=True).start()
+    threading.Thread(target=run, daemon=False).start()
     return (
         f"Speech generation is running in the background ({engine} · {voice}). "
         f"You'll receive macOS notifications at each stage:\n"
