@@ -362,7 +362,9 @@ def generate_speech(
 
 @mcp.tool()
 def list_kokoro_voices() -> str:
-    """List all available Kokoro voice names."""
+    """List all available Kokoro voice names and present them to the user as a
+    pick list so they can select one before generating speech. After the user
+    makes a selection, proceed to call generate_speech with their chosen voice."""
     voices = {
         "af_heart":    "American Female — Heart (warm, natural)",
         "af_bella":    "American Female — Bella",
