@@ -9,7 +9,6 @@ never interrupts generation.
 
 import json
 import subprocess
-import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -120,11 +119,17 @@ def generate_speech(
 
     notify("Generating Speech…", f"{engine} · {voice} · {len(text):,} chars")
 
+    log_path = ogg_path.with_suffix(".worker.log")
     subprocess.Popen(
-        [sys.executable, str(WORKER_PATH), str(params_file)],
+        [
+            "uv", "run",
+            "--project", str(Path(__file__).parent),
+            "python", str(WORKER_PATH),
+            str(params_file),
+        ],
         start_new_session=True,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=open(log_path, "w"),
     )
 
     return (
