@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+
+# Models (large binary files — download separately)
+models/
+
+# Generated audio and player files
+*.wav
+*.mp3
+*.html
+
+# UV
+uv.lock
+.python-version
+
+# macOS
+.DS_Store

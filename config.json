@@ -1,0 +1,14 @@
+{
+  "output_dir": "~/Music/TTS",
+  "whisper_model": "small",
+  "piper": {
+    "default_voice": "~/.local/share/piper/en_US-lessac-medium.onnx"
+  },
+  "kokoro": {
+    "default_voice": "af_heart",
+    "model_path": "~/Documents/GitHub/karaoke-tts/models/kokoro-v1.0.onnx",
+    "voices_path": "~/Documents/GitHub/karaoke-tts/models/voices-v1.0.bin",
+    "lang": "en-us",
+    "speed": 1.0
+  }
+}
