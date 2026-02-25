@@ -178,13 +178,6 @@ PLAYER_TEMPLATE = """<!DOCTYPE html>
 # Helpers
 # ---------------------------------------------------------------------------
 
-def notify(title: str, message: str) -> None:
-    subprocess.run(
-        ["terminal-notifier", "-title", title, "-message", message],
-        check=False,
-    )
-
-
 def sanitize_text(text: str) -> str:
     """Normalize text for safe Kokoro/espeak-ng processing.
 
@@ -242,16 +235,6 @@ def resolve(p: str) -> Path:
 # ---------------------------------------------------------------------------
 # TTS engines
 # ---------------------------------------------------------------------------
-
-def generate_piper(text: str, voice: str, out_path: Path) -> None:
-    from piper import PiperVoice
-    piper_voice = PiperVoice.load(str(resolve(voice)))
-    chunks = list(piper_voice.synthesize(text))
-    if not chunks:
-        raise RuntimeError("Piper produced no audio output")
-    audio = np.concatenate([c.audio_float_array for c in chunks])
-    sf.write(str(out_path), audio, chunks[0].sample_rate)
-
 
 def generate_kokoro(
     text: str, voice: str, out_path: Path, config: dict,
@@ -318,11 +301,11 @@ def get_word_timestamps(audio_path: Path, model_size: str, _log=None) -> list[di
 # ---------------------------------------------------------------------------
 
 def generate_player(
-    words: list[dict], engine: str, voice: str, ogg_path: Path, html_path: Path
+    words: list[dict], voice: str, ogg_path: Path, html_path: Path
 ) -> None:
     html = (
         PLAYER_TEMPLATE
-        .replace("__ENGINE__", engine.upper())
+        .replace("__ENGINE__", "KOKORO")
         .replace("__VOICE__", voice.upper())
         .replace("__AUDIO__", ogg_path.name)
         .replace("__WORDS__", json.dumps(words))
@@ -340,7 +323,6 @@ def main() -> None:
     params_file.unlink(missing_ok=True)
 
     text         = params["text"]
-    engine       = params["engine"]
     voice        = params["voice"]
     ogg_path     = Path(params["ogg_path"])
     html_path    = Path(params["html_path"])
@@ -354,32 +336,26 @@ def main() -> None:
             f.write(msg + "\n")
             f.flush()
 
-    log(f"worker started: engine={engine} voice={voice} text_len={len(text)}")
+    log(f"worker started: voice={voice} text_len={len(text)}")
 
     try:
         log("step 1: TTS synthesis")
         log(f"step 1: text preview: {repr(text[:200])}")
-        if engine == "piper":
-            generate_piper(text, voice, ogg_path)
-        else:
-            generate_kokoro(text, voice, ogg_path, config, _log=log)
+        generate_kokoro(text, voice, ogg_path, config, _log=log)
         log(f"step 1 done: ogg_path={ogg_path} size={ogg_path.stat().st_size if ogg_path.exists() else 'MISSING'}")
 
-        notify("Syncing words…", ogg_path.name)
         log("step 2: word timestamps")
         words = get_word_timestamps(ogg_path, whisper_model, _log=log)
         log(f"step 2 done: {len(words)} words")
 
         log("step 3: generate player")
-        generate_player(words, engine, voice, ogg_path, html_path)
+        generate_player(words, voice, ogg_path, html_path)
         log("step 3 done: opening browser")
-        notify("Karaoke Ready", ogg_path.stem)
         subprocess.run(["open", str(html_path)], check=False)
         log("done")
     except Exception as e:
         import traceback
         log(f"EXCEPTION: {e}\n{traceback.format_exc()}")
-        notify("Speech Failed", str(e))
         sys.exit(1)
 
 

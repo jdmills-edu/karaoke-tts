@@ -1,6 +1,6 @@
 # karaoke-tts
 
-A local MCP server that synthesizes speech and opens a karaoke-style browser player with word-by-word highlighting synchronized to the audio. Built on [Piper](https://github.com/rhasspy/piper) or [Kokoro](https://github.com/thewh1teagle/kokoro-onnx) for TTS and [faster-whisper](https://github.com/SYSTRAN/faster-whisper) for word timestamps.
+A local MCP server that synthesizes speech and opens a karaoke-style browser player with word-by-word highlighting synchronized to the audio. Built on [Kokoro](https://github.com/thewh1teagle/kokoro-onnx) for TTS and [faster-whisper](https://github.com/SYSTRAN/faster-whisper) for word timestamps.
 
 Forked from [local-hq-tts](https://github.com/jdmills-edu/local-hq-tts).
 
@@ -19,10 +19,9 @@ Streaming mode typically plays the first audio within 2-4 seconds of starting sy
 ### Standard mode (`streaming=False`)
 
 1. Claude calls `generate_speech` with `streaming=False`
-2. TTS synthesis runs in the background (Piper or Kokoro)
+2. Kokoro synthesizes the full audio in the background
 3. faster-whisper transcribes the audio to extract word-level timestamps
 4. A self-contained HTML player is generated and opened in your browser
-5. macOS notifications fire at each stage
 
 ## Tools
 
@@ -31,14 +30,13 @@ Streaming mode typically plays the first audio within 2-4 seconds of starting sy
 | `generate_speech` | Synthesize text → karaoke player. Streams by default (Kokoro). |
 | `list_kokoro_voices` | List available Kokoro voice names |
 
-`engine` and `voice` are required. Claude will always call `list_kokoro_voices` first.
+`voice` is required. Claude will always call `list_kokoro_voices` first.
 
-`streaming` defaults to `True`. When enabled with Kokoro, audio plays in the browser within seconds. Set `streaming=False` for standard mode (full synthesis before playback). Streaming is ignored for Piper.
+`streaming` defaults to `True`. Audio plays in the browser within seconds. Set `streaming=False` for standard mode (full synthesis before playback).
 
 ## Prerequisites
 
 - [uv](https://docs.astral.sh/uv/)
-- `terminal-notifier`: `brew install terminal-notifier`
 
 ## Setup
 
@@ -50,15 +48,6 @@ uv sync
 ```
 
 ### 2. Download TTS models
-
-**Piper** (~60MB):
-```bash
-mkdir -p ~/.local/share/piper
-curl -L -o ~/.local/share/piper/en_US-lessac-medium.onnx \
-  https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx
-curl -L -o ~/.local/share/piper/en_US-lessac-medium.onnx.json \
-  https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json
-```
 
 **Kokoro** (~310MB):
 ```bash
@@ -100,9 +89,6 @@ Restart Claude Desktop after saving.
 {
   "output_dir": "~/Music/TTS",
   "whisper_model": "small",
-  "piper": {
-    "default_voice": "~/.local/share/piper/en_US-lessac-medium.onnx"
-  },
   "kokoro": {
     "default_voice": "af_heart",
     "model_path": "~/Documents/GitHub/karaoke-tts/models/kokoro-v1.0.onnx",

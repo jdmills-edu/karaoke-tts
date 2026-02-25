@@ -30,7 +30,6 @@ import soundfile as sf
 from worker import (
     PLAYER_TEMPLATE,
     generate_player,
-    notify,
     resolve,
     sanitize_text,
 )
@@ -568,7 +567,6 @@ async def run_streaming_server(params: dict) -> None:
     import uvicorn
 
     text = params["text"]
-    engine = params["engine"]
     voice = params["voice"]
     config = params["config"]
     ogg_path = Path(params["ogg_path"])
@@ -581,10 +579,10 @@ async def run_streaming_server(params: dict) -> None:
             f.write(msg + "\n")
             f.flush()
 
-    log(f"streaming worker started: engine={engine} voice={voice} text_len={len(text)}")
+    log(f"streaming worker started: voice={voice} text_len={len(text)}")
 
     # Badge text for the player header
-    badge = f"{engine.upper()} \u00b7 {voice.upper()} \u00b7 STREAMING"
+    badge = f"KOKORO \u00b7 {voice.upper()} \u00b7 STREAMING"
     player_html = STREAMING_PLAYER_HTML.replace("__BADGE__", badge)
 
     # Shared state between routes and synthesis
@@ -654,7 +652,6 @@ async def run_streaming_server(params: dict) -> None:
             await asyncio.wait_for(client_connected.wait(), timeout=30)
         except asyncio.TimeoutError:
             log("client never connected, shutting down")
-            notify("Streaming Failed", "Browser never connected")
             server.should_exit = True
             return
 
@@ -667,7 +664,6 @@ async def run_streaming_server(params: dict) -> None:
         except Exception as e:
             import traceback
             log(f"synthesis error: {e}\n{traceback.format_exc()}")
-            notify("Streaming Failed", str(e))
             all_done.set()
             server.should_exit = True
             return
@@ -679,7 +675,7 @@ async def run_streaming_server(params: dict) -> None:
         # No separate full-file Whisper pass needed — per-chunk refinement
         # already produced accurate word timings during synthesis.
         log("stage 2: archival output")
-        generate_player(all_words, engine, voice, ogg_path, html_path)
+        generate_player(all_words, voice, ogg_path, html_path)
         log(f"archival HTML saved: {html_path}")
 
         ws = client_ws[0]
@@ -690,7 +686,6 @@ async def run_streaming_server(params: dict) -> None:
                 "oggPath": str(ogg_path),
             })
 
-        notify("Karaoke Ready", ogg_path.stem)
         log("done — waiting for client disconnect or timeout")
 
         # Wait for client to disconnect or timeout
@@ -926,7 +921,6 @@ def main() -> None:
         log_path = ogg_path.with_suffix(".worker.log")
         with open(log_path, "a") as f:
             f.write(f"FATAL: {e}\n{traceback.format_exc()}\n")
-        notify("Streaming Failed", str(e))
         sys.exit(1)
 
 
