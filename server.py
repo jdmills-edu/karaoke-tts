@@ -43,6 +43,7 @@ def generate_speech(
     text: str,
     voice: str,
     streaming: bool = True,
+    title: str = None,
     output_path: str = None,
 ) -> str:
     """Synthesize speech and open a karaoke browser player with word-by-word
@@ -86,6 +87,10 @@ def generate_speech(
         streaming: Stream audio to the browser as it is synthesized
                    (default True). Set to False for standard mode where
                    the browser opens after synthesis completes.
+        title: Optional short title for the karaoke player (displayed
+               prominently at the top of the page and as the browser
+               tab title). Generate a brief, descriptive title based
+               on the content being synthesized.
         output_path: Optional custom path for the OGG file.
                      The HTML player is saved alongside it automatically.
 
@@ -106,6 +111,7 @@ def generate_speech(
     params_file.write_text(json.dumps({
         "text": text,
         "voice": voice,
+        "title": title or "",
         "ogg_path": str(ogg_path),
         "html_path": str(html_path),
         "config": config,

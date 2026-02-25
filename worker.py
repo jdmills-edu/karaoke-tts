@@ -26,7 +26,8 @@ PLAYER_TEMPLATE = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>karaoke-tts</title>
+  <title>__TITLE__</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230d0d1a'/><g transform='translate(4,3) scale(0.75)'><path d='M16 2a5 5 0 0 0-5 5v8a5 5 0 0 0 10 0V7a5 5 0 0 0-5-5z' fill='%23f5c518'/><path d='M8 14v1a8 8 0 0 0 16 0v-1' stroke='%23f5c518' stroke-width='2' fill='none' stroke-linecap='round'/><line x1='16' y1='23' x2='16' y2='27' stroke='%23f5c518' stroke-width='2' stroke-linecap='round'/><line x1='12' y1='27' x2='20' y2='27' stroke='%23f5c518' stroke-width='2' stroke-linecap='round'/></g></svg>">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -43,18 +44,25 @@ PLAYER_TEMPLATE = """<!DOCTYPE html>
     #header {
       padding: 24px 60px 16px;
       display: flex;
-      justify-content: space-between;
+      justify-content: center;
       align-items: center;
       border-bottom: 1px solid #1a1a2e;
       flex-shrink: 0;
+    }
+    #header:empty { display: none; }
+    #title {
+      font-size: 16px;
+      font-weight: 600;
+      color: #2a2a52;
+      letter-spacing: 0.01em;
     }
     #badge {
       font-size: 12px;
       font-weight: 600;
       letter-spacing: 0.12em;
       color: #44447a;
+      flex-shrink: 0;
     }
-    #dur { font-size: 13px; color: #44447a; font-variant-numeric: tabular-nums; }
     #scroll { flex: 1; overflow-y: auto; padding: 60px; }
     #text { max-width: 860px; margin: 0 auto; }
     .w { color: #2a2a52; transition: color 0.07s ease, text-shadow 0.07s ease; }
@@ -94,10 +102,7 @@ PLAYER_TEMPLATE = """<!DOCTYPE html>
   </style>
 </head>
 <body>
-  <div id="header">
-    <span id="badge">__ENGINE__ · __VOICE__</span>
-    <span id="dur">—</span>
-  </div>
+  <div id="header">__HEADER_CONTENT__</div>
   <div id="scroll"><div id="text"></div></div>
   <div id="footer">
     <button id="playbtn" title="Play / Pause">
@@ -107,6 +112,7 @@ PLAYER_TEMPLATE = """<!DOCTYPE html>
     </button>
     <div id="track"><div id="fill"></div></div>
     <span id="time">0:00</span>
+    <span id="badge">__ENGINE__ · __VOICE__</span>
   </div>
   <audio id="a" src="__AUDIO__"></audio>
   <script>
@@ -301,10 +307,15 @@ def get_word_timestamps(audio_path: Path, model_size: str, _log=None) -> list[di
 # ---------------------------------------------------------------------------
 
 def generate_player(
-    words: list[dict], voice: str, ogg_path: Path, html_path: Path
+    words: list[dict], voice: str, ogg_path: Path, html_path: Path,
+    title: str = "",
 ) -> None:
+    page_title = title if title else "karaoke-tts"
+    header_content = f'<span id="title">{title}</span>' if title else ""
     html = (
         PLAYER_TEMPLATE
+        .replace("__TITLE__", page_title)
+        .replace("__HEADER_CONTENT__", header_content)
         .replace("__ENGINE__", "KOKORO")
         .replace("__VOICE__", voice.upper())
         .replace("__AUDIO__", ogg_path.name)
@@ -324,6 +335,7 @@ def main() -> None:
 
     text         = params["text"]
     voice        = params["voice"]
+    title        = params.get("title", "")
     ogg_path     = Path(params["ogg_path"])
     html_path    = Path(params["html_path"])
     config       = params["config"]
@@ -349,7 +361,7 @@ def main() -> None:
         log(f"step 2 done: {len(words)} words")
 
         log("step 3: generate player")
-        generate_player(words, voice, ogg_path, html_path)
+        generate_player(words, voice, ogg_path, html_path, title=title)
         log("step 3 done: opening browser")
         subprocess.run(["open", str(html_path)], check=False)
         log("done")

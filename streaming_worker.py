@@ -78,7 +78,8 @@ STREAMING_PLAYER_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>karaoke-tts streaming</title>
+  <title>__TITLE__</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230d0d1a'/><g transform='translate(4,3) scale(0.75)'><path d='M16 2a5 5 0 0 0-5 5v8a5 5 0 0 0 10 0V7a5 5 0 0 0-5-5z' fill='%23f5c518'/><path d='M8 14v1a8 8 0 0 0 16 0v-1' stroke='%23f5c518' stroke-width='2' fill='none' stroke-linecap='round'/><line x1='16' y1='23' x2='16' y2='27' stroke='%23f5c518' stroke-width='2' stroke-linecap='round'/><line x1='12' y1='27' x2='20' y2='27' stroke='%23f5c518' stroke-width='2' stroke-linecap='round'/></g></svg>">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -95,22 +96,33 @@ STREAMING_PLAYER_HTML = """<!DOCTYPE html>
     #header {
       padding: 24px 60px 16px;
       display: flex;
-      justify-content: space-between;
+      justify-content: center;
       align-items: center;
       border-bottom: 1px solid #1a1a2e;
       flex-shrink: 0;
     }
+    #header:empty { display: none; }
+    #title {
+      font-size: 16px;
+      font-weight: 600;
+      color: #f5c518;
+      letter-spacing: 0.01em;
+      transition: color 0.6s ease;
+    }
+    #title.dimmed { color: #2a2a52; }
     #badge {
       font-size: 12px;
       font-weight: 600;
       letter-spacing: 0.12em;
       color: #44447a;
+      flex-shrink: 0;
     }
     #status {
       font-size: 12px;
       color: #44447a;
       font-variant-numeric: tabular-nums;
       transition: opacity 0.3s;
+      flex-shrink: 0;
     }
     #dur { font-size: 13px; color: #44447a; font-variant-numeric: tabular-nums; }
     #scroll { flex: 1; overflow-y: auto; padding: 60px; }
@@ -162,10 +174,7 @@ STREAMING_PLAYER_HTML = """<!DOCTYPE html>
   </style>
 </head>
 <body>
-  <div id="header">
-    <span id="badge">__BADGE__</span>
-    <span id="status">connecting...</span>
-  </div>
+  <div id="header">__HEADER_CONTENT__</div>
   <div id="scroll"><div id="text"></div></div>
   <div id="footer">
     <div id="spinner">
@@ -180,6 +189,8 @@ STREAMING_PLAYER_HTML = """<!DOCTYPE html>
     </button>
     <div id="track"><div id="fill"></div></div>
     <span id="time">0:00</span>
+    <span id="status">connecting...</span>
+    <span id="badge">__BADGE__</span>
   </div>
   <script>
     // --- State ---
@@ -454,6 +465,8 @@ STREAMING_PLAYER_HTML = """<!DOCTYPE html>
       if (allBuffers.length === 1) {
         document.getElementById("spinner").classList.add("hidden");
         playbtn.classList.add("ready");
+        const titleEl = document.getElementById("title");
+        if (titleEl) titleEl.classList.add("dimmed");
       }
 
       // Add word spans
@@ -568,6 +581,7 @@ async def run_streaming_server(params: dict) -> None:
 
     text = params["text"]
     voice = params["voice"]
+    title = params.get("title", "")
     config = params["config"]
     ogg_path = Path(params["ogg_path"])
     html_path = Path(params["html_path"])
@@ -581,9 +595,16 @@ async def run_streaming_server(params: dict) -> None:
 
     log(f"streaming worker started: voice={voice} text_len={len(text)}")
 
-    # Badge text for the player header
+    # Title and badge for the player header
+    page_title = title if title else "karaoke-tts streaming"
+    header_content = f'<span id="title">{title}</span>' if title else ""
     badge = f"KOKORO \u00b7 {voice.upper()} \u00b7 STREAMING"
-    player_html = STREAMING_PLAYER_HTML.replace("__BADGE__", badge)
+    player_html = (
+        STREAMING_PLAYER_HTML
+        .replace("__TITLE__", page_title)
+        .replace("__HEADER_CONTENT__", header_content)
+        .replace("__BADGE__", badge)
+    )
 
     # Shared state between routes and synthesis
     client_ws: list[WebSocket | None] = [None]
@@ -675,7 +696,7 @@ async def run_streaming_server(params: dict) -> None:
         # No separate full-file Whisper pass needed — per-chunk refinement
         # already produced accurate word timings during synthesis.
         log("stage 2: archival output")
-        generate_player(all_words, voice, ogg_path, html_path)
+        generate_player(all_words, voice, ogg_path, html_path, title=title)
         log(f"archival HTML saved: {html_path}")
 
         ws = client_ws[0]
