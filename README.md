@@ -36,33 +36,52 @@ Streaming mode typically plays the first audio within 2-4 seconds of starting sy
 
 ## Prerequisites
 
+- Python 3.10+
 - [uv](https://docs.astral.sh/uv/)
 
 ## Setup
 
 ### 1. Install dependencies
 
+From the project root:
+
 ```bash
-cd ~/Documents/GitHub/karaoke-tts
 uv sync
 ```
 
 ### 2. Download TTS models
 
+Download to the `models/` directory inside the project.
+
 **Kokoro** (~310MB):
+
+macOS / Linux:
 ```bash
-mkdir -p ~/Documents/GitHub/karaoke-tts/models
-curl -L -o ~/Documents/GitHub/karaoke-tts/models/kokoro-v1.0.onnx \
+mkdir -p models
+curl -L -o models/kokoro-v1.0.onnx \
   https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx
-curl -L -o ~/Documents/GitHub/karaoke-tts/models/voices-v1.0.bin \
+curl -L -o models/voices-v1.0.bin \
   https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
+```
+
+Windows (PowerShell):
+```powershell
+New-Item -ItemType Directory -Force -Path models
+Invoke-WebRequest -Uri "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx" -OutFile "models\kokoro-v1.0.onnx"
+Invoke-WebRequest -Uri "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin" -OutFile "models\voices-v1.0.bin"
 ```
 
 The faster-whisper `small` model (~460MB) downloads automatically on first use to `~/.cache/huggingface/`.
 
 ### 3. Add to Claude Desktop
 
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+Add to your Claude Desktop configuration file:
+
+| Platform | Config file location |
+|----------|---------------------|
+| macOS    | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Linux    | `~/.config/Claude/claude_desktop_config.json` |
+| Windows  | `%APPDATA%\Claude\claude_desktop_config.json` |
 
 ```json
 {
@@ -72,14 +91,16 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
       "args": [
         "run",
         "--project",
-        "/Users/YOUR_USERNAME/Documents/GitHub/karaoke-tts",
+        "/path/to/karaoke-tts",
         "python",
-        "/Users/YOUR_USERNAME/Documents/GitHub/karaoke-tts/server.py"
+        "/path/to/karaoke-tts/server.py"
       ]
     }
   }
 }
 ```
+
+Replace `/path/to/karaoke-tts` with the absolute path to your cloned repository. On Windows, use forward slashes (e.g. `C:/Users/you/karaoke-tts`).
 
 Restart Claude Desktop after saving.
 
@@ -91,12 +112,14 @@ Restart Claude Desktop after saving.
   "whisper_model": "small",
   "kokoro": {
     "default_voice": "af_heart",
-    "model_path": "~/Documents/GitHub/karaoke-tts/models/kokoro-v1.0.onnx",
-    "voices_path": "~/Documents/GitHub/karaoke-tts/models/voices-v1.0.bin",
+    "model_path": "models/kokoro-v1.0.onnx",
+    "voices_path": "models/voices-v1.0.bin",
     "lang": "en-us",
     "speed": 1.0
   }
 }
 ```
+
+Model paths are relative to the project directory. Absolute paths and `~` expansion are also supported.
 
 `whisper_model` can be `"tiny"`, `"base"`, `"small"`, `"medium"`, or `"large-v3"`. Larger models give more accurate word timestamps but are slower.

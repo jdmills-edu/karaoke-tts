@@ -17,10 +17,12 @@ Usage: python streaming_worker.py <params_json_file>
 import asyncio
 import io
 import json
+import os
 import re
 import socket
-import subprocess
 import sys
+import tempfile
+import webbrowser
 from pathlib import Path
 
 import numpy as np
@@ -667,7 +669,7 @@ async def run_streaming_server(params: dict) -> None:
     async def run_pipeline():
         """Wait for client, synthesize, refine, save archival."""
         # Open browser
-        subprocess.run(["open", f"http://127.0.0.1:{port}"], check=False)
+        webbrowser.open(f"http://127.0.0.1:{port}")
 
         # Wait for the browser to connect
         try:
@@ -741,8 +743,6 @@ def _blocking_synthesis(
     Returns the list of all word timings (refined where Whisper succeeded,
     estimated where it failed).
     """
-    import tempfile
-
     from kokoro_onnx import Kokoro
     from faster_whisper import WhisperModel
 
@@ -821,7 +821,9 @@ def _blocking_synthesis(
 
             # --- Incremental Whisper refinement ---
             try:
-                tmp_path = Path(tempfile.mktemp(suffix=".wav"))
+                fd, tmp_path_str = tempfile.mkstemp(suffix=".wav")
+                os.close(fd)
+                tmp_path = Path(tmp_path_str)
                 sf.write(str(tmp_path), raw_samples, sr)
 
                 segments, _ = whisper_model.transcribe(
@@ -943,7 +945,8 @@ def main() -> None:
         pass
     except Exception as e:
         import traceback
-        ogg_path = Path(params.get("ogg_path", "/tmp/streaming_error"))
+        ogg_path = Path(params.get("ogg_path",
+            str(Path(tempfile.gettempdir()) / "streaming_error")))
         log_path = ogg_path.with_suffix(".worker.log")
         with open(log_path, "a") as f:
             f.write(f"FATAL: {e}\n{traceback.format_exc()}\n")

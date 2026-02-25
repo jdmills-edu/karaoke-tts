@@ -11,8 +11,8 @@ Usage: python worker.py <params_json_file>
 
 import json
 import re
-import subprocess
 import sys
+import webbrowser
 from pathlib import Path
 
 import numpy as np
@@ -231,8 +231,14 @@ def chunk_text(text: str, max_chars: int = 800) -> list[str]:
     return chunks or [text]
 
 
+PROJECT_DIR = Path(__file__).parent
+
+
 def resolve(p: str) -> Path:
-    return Path(p).expanduser().resolve()
+    path = Path(p).expanduser()
+    if not path.is_absolute():
+        path = PROJECT_DIR / path
+    return path.resolve()
 
 
 # ---------------------------------------------------------------------------
@@ -587,7 +593,7 @@ def main() -> None:
         log("step 3: generate player")
         generate_player(words, voice, ogg_path, html_path, title=title)
         log("step 3 done: opening browser")
-        subprocess.run(["open", str(html_path)], check=False)
+        webbrowser.open(html_path.as_uri())
         log("done")
     except Exception as e:
         import traceback

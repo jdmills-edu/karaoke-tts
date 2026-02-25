@@ -8,16 +8,19 @@ never interrupts generation.
 """
 
 import json
+import os
 import subprocess
+import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-CONFIG_PATH = Path(__file__).parent / "config.json"
-WORKER_PATH = Path(__file__).parent / "worker.py"
-STREAMING_WORKER_PATH = Path(__file__).parent / "streaming_worker.py"
+PROJECT_DIR = Path(__file__).parent
+CONFIG_PATH = PROJECT_DIR / "config.json"
+WORKER_PATH = PROJECT_DIR / "worker.py"
+STREAMING_WORKER_PATH = PROJECT_DIR / "streaming_worker.py"
 
 mcp = FastMCP("karaoke-tts")
 
@@ -28,7 +31,10 @@ def load_config() -> dict:
 
 
 def resolve(p: str) -> Path:
-    return Path(p).expanduser().resolve()
+    path = Path(p).expanduser()
+    if not path.is_absolute():
+        path = PROJECT_DIR / path
+    return path.resolve()
 
 
 def make_output_paths(config: dict) -> tuple[Path, Path]:
@@ -110,7 +116,9 @@ def generate_speech(
     else:
         ogg_path, html_path = make_output_paths(config)
 
-    params_file = Path(tempfile.mktemp(suffix=".json"))
+    fd, params_path = tempfile.mkstemp(suffix=".json")
+    os.close(fd)
+    params_file = Path(params_path)
     params_file.write_text(json.dumps({
         "text": text,
         "voice": voice,
@@ -120,14 +128,21 @@ def generate_speech(
         "config": config,
     }))
 
-    venv_python = Path(__file__).parent / ".venv" / "bin" / "python"
+    if sys.platform == "win32":
+        venv_python = PROJECT_DIR / ".venv" / "Scripts" / "python.exe"
+    else:
+        venv_python = PROJECT_DIR / ".venv" / "bin" / "python"
     worker = STREAMING_WORKER_PATH if use_streaming else WORKER_PATH
+
+    popen_kwargs = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if sys.platform == "win32":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kwargs["start_new_session"] = True
 
     subprocess.Popen(
         [str(venv_python), str(worker), str(params_file)],
-        start_new_session=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        **popen_kwargs,
     )
 
     if use_streaming:
