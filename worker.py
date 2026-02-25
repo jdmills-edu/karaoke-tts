@@ -236,6 +236,229 @@ def resolve(p: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Whisper → source text alignment
+# ---------------------------------------------------------------------------
+
+def _clean(word: str) -> str:
+    """Lowercase and strip non-alphanumeric chars for fuzzy comparison."""
+    return re.sub(r"[^a-z0-9]", "", word.lower())
+
+
+def _similarity(a: str, b: str) -> float:
+    """Normalized character-level similarity (0.0–1.0) between two words."""
+    a, b = _clean(a), _clean(b)
+    if not a and not b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    # Optimistic short-circuit for exact match
+    if a == b:
+        return 1.0
+    # Use ratio of longest common subsequence to max length.
+    # LCS is more forgiving than Levenshtein for partial matches
+    # (e.g. Whisper hearing "economy" as "economies").
+    m, n = len(a), len(b)
+    # Space-efficient LCS length via two rows
+    prev = [0] * (n + 1)
+    for i in range(1, m + 1):
+        curr = [0] * (n + 1)
+        for j in range(1, n + 1):
+            if a[i - 1] == b[j - 1]:
+                curr[j] = prev[j - 1] + 1
+            else:
+                curr[j] = max(prev[j], curr[j - 1])
+        prev = curr
+    lcs_len = prev[n]
+    return lcs_len / max(m, n)
+
+
+def align_words(
+    source_text: str,
+    whisper_words: list[dict],
+    _log=None,
+) -> list[dict]:
+    """Align Whisper-detected words against known source text.
+
+    Keeps the source words (ground truth) but uses Whisper's timing.
+    Uses Needleman-Wunsch global sequence alignment with character-level
+    similarity scoring.
+
+    Args:
+        source_text: The original text that was synthesized.
+        whisper_words: Word dicts from Whisper with 'word', 'start', 'end'.
+
+    Returns:
+        Aligned word dicts using source words with Whisper timings.
+    """
+    # Tokenize source text into words (preserving order)
+    src_tokens = source_text.split()
+    if not src_tokens or not whisper_words:
+        return whisper_words  # nothing to align
+
+    whisper_tokens = [w["word"].strip() for w in whisper_words]
+
+    n_src = len(src_tokens)
+    n_wh = len(whisper_tokens)
+
+    # --- Needleman-Wunsch alignment ---
+    MATCH_BONUS = 2.0      # reward for high-similarity alignment
+    MISMATCH_PENALTY = -1.0  # penalty for low-similarity alignment
+    GAP_PENALTY = -0.5     # penalty for skipping a word
+    SIM_THRESHOLD = 0.4    # minimum similarity to count as a match
+
+    # Build score matrix
+    dp = [[0.0] * (n_wh + 1) for _ in range(n_src + 1)]
+    for i in range(1, n_src + 1):
+        dp[i][0] = dp[i - 1][0] + GAP_PENALTY
+    for j in range(1, n_wh + 1):
+        dp[0][j] = dp[0][j - 1] + GAP_PENALTY
+
+    for i in range(1, n_src + 1):
+        for j in range(1, n_wh + 1):
+            sim = _similarity(src_tokens[i - 1], whisper_tokens[j - 1])
+            if sim >= SIM_THRESHOLD:
+                score = MATCH_BONUS * sim
+            else:
+                score = MISMATCH_PENALTY
+            diag = dp[i - 1][j - 1] + score
+            up = dp[i - 1][j] + GAP_PENALTY    # skip source word
+            left = dp[i][j - 1] + GAP_PENALTY  # skip whisper word
+            dp[i][j] = max(diag, up, left)
+
+    # Traceback
+    pairs = []  # (src_idx | None, whisper_idx | None)
+    i, j = n_src, n_wh
+    while i > 0 or j > 0:
+        if i > 0 and j > 0:
+            sim = _similarity(src_tokens[i - 1], whisper_tokens[j - 1])
+            if sim >= SIM_THRESHOLD:
+                score = MATCH_BONUS * sim
+            else:
+                score = MISMATCH_PENALTY
+            if dp[i][j] == dp[i - 1][j - 1] + score:
+                pairs.append((i - 1, j - 1))
+                i -= 1
+                j -= 1
+                continue
+        if i > 0 and dp[i][j] == dp[i - 1][j] + GAP_PENALTY:
+            pairs.append((i - 1, None))  # source word, no Whisper match
+            i -= 1
+        else:
+            pairs.append((None, j - 1))  # Whisper hallucination, no source
+            j -= 1
+
+    pairs.reverse()
+
+    # --- Build aligned output ---
+    # First pass: collect matched pairs, unmatched source words, and
+    # unmatched Whisper words (with their timings for redistribution).
+    aligned = []       # output list
+    discarded = []     # (output_position, whisper_words[wh_idx]) for unmatched Whisper
+    for src_idx, wh_idx in pairs:
+        if src_idx is not None and wh_idx is not None:
+            sim = _similarity(src_tokens[src_idx], whisper_tokens[wh_idx])
+            if sim >= SIM_THRESHOLD:
+                # Good match: source word + Whisper timing
+                w = whisper_words[wh_idx].copy()
+                w["word"] = " " + src_tokens[src_idx]
+                aligned.append(w)
+            else:
+                # Low-quality diagonal: treat source as unmatched,
+                # Whisper as discarded (timing available for redistribution)
+                aligned.append({
+                    "word": " " + src_tokens[src_idx],
+                    "start": None,
+                    "end": None,
+                })
+                discarded.append((len(aligned), whisper_words[wh_idx]))
+        elif src_idx is not None and wh_idx is None:
+            # Source word that Whisper missed — timing filled in below
+            aligned.append({
+                "word": " " + src_tokens[src_idx],
+                "start": None,
+                "end": None,
+            })
+        else:
+            # Unmatched Whisper word — save its timing for redistribution
+            discarded.append((len(aligned), whisper_words[wh_idx]))
+
+    # Second pass: redistribute discarded Whisper timings to nearby
+    # unmatched source words.  This handles cases like Whisper collapsing
+    # "twenty twenty-two" into "2022" — the source words are unmatched
+    # and the Whisper word is discarded, but they occupy the same time.
+    for insert_pos, wh_word in discarded:
+        # Find the nearest unmatched word to insert_pos, searching outward
+        search_pos = min(insert_pos, len(aligned) - 1)
+        found = None
+        for offset in range(len(aligned)):
+            for candidate in [search_pos - offset, search_pos + offset]:
+                if 0 <= candidate < len(aligned) and aligned[candidate]["start"] is None:
+                    found = candidate
+                    break
+            if found is not None:
+                break
+        if found is None:
+            continue
+        # Expand to the full contiguous span of unmatched words
+        span_start = found
+        while span_start > 0 and aligned[span_start - 1]["start"] is None:
+            span_start -= 1
+        span_end = found
+        while span_end < len(aligned) - 1 and aligned[span_end + 1]["start"] is None:
+            span_end += 1
+        # Distribute this Whisper word's time range across the span
+        count = span_end - span_start + 1
+        wh_start = wh_word["start"]
+        wh_end = wh_word["end"]
+        duration = (wh_end - wh_start) / count
+        for g in range(count):
+            aligned[span_start + g]["start"] = round(wh_start + g * duration, 3)
+            aligned[span_start + g]["end"] = round(wh_start + (g + 1) * duration, 3)
+
+    # Third pass: interpolate any remaining unmatched source words from
+    # their timed neighbors.
+    for k in range(len(aligned)):
+        if aligned[k]["start"] is not None:
+            continue
+        prev_end = None
+        for p in range(k - 1, -1, -1):
+            if aligned[p]["end"] is not None:
+                prev_end = aligned[p]["end"]
+                break
+        next_start = None
+        for p in range(k + 1, len(aligned)):
+            if aligned[p]["start"] is not None:
+                next_start = aligned[p]["start"]
+                break
+        if prev_end is not None and next_start is not None:
+            gap_start = k
+            while gap_start > 0 and aligned[gap_start - 1]["start"] is None:
+                gap_start -= 1
+            gap_end = k
+            while gap_end < len(aligned) - 1 and aligned[gap_end + 1]["start"] is None:
+                gap_end += 1
+            gap_count = gap_end - gap_start + 1
+            duration = (next_start - prev_end) / gap_count
+            for g in range(gap_count):
+                aligned[gap_start + g]["start"] = round(prev_end + g * duration, 3)
+                aligned[gap_start + g]["end"] = round(prev_end + (g + 1) * duration, 3)
+        elif prev_end is not None:
+            aligned[k]["start"] = prev_end
+            aligned[k]["end"] = round(prev_end + 0.2, 3)
+        elif next_start is not None:
+            aligned[k]["start"] = round(max(0, next_start - 0.2), 3)
+            aligned[k]["end"] = next_start
+        else:
+            aligned[k]["start"] = 0.0
+            aligned[k]["end"] = 0.2
+
+    if _log:
+        _log(f"align: {n_src} source, {n_wh} whisper → {len(aligned)} aligned")
+
+    return aligned
+
+
+# ---------------------------------------------------------------------------
 # TTS engines
 # ---------------------------------------------------------------------------
 
@@ -356,6 +579,10 @@ def main() -> None:
         log("step 2: word timestamps")
         words = get_word_timestamps(ogg_path, whisper_model, _log=log)
         log(f"step 2 done: {len(words)} words")
+
+        log("step 2b: align words to source text")
+        words = align_words(sanitize_text(text), words, _log=log)
+        log(f"step 2b done: {len(words)} aligned words")
 
         log("step 3: generate player")
         generate_player(words, voice, ogg_path, html_path, title=title)
