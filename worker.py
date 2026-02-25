@@ -185,36 +185,33 @@ PLAYER_TEMPLATE = """<!DOCTYPE html>
 # ---------------------------------------------------------------------------
 
 def sanitize_text(text: str) -> str:
-    """Normalize text for safe Kokoro/espeak-ng processing.
+    """Normalize text for Kokoro TTS processing.
 
-    Collapses whitespace/newlines and replaces Unicode punctuation and
-    special characters that can cause native library crashes.
+    Handles whitespace/newline normalization and replaces a small set of
+    Unicode characters that Kokoro cannot process natively.  Most
+    punctuation and special characters (hyphens, %, $, &, etc.) are left
+    intact — Kokoro handles them correctly.
     """
     replacements = [
-        # Curly quotes → straight quotes
-        ("\u2018", "'"), ("\u2019", "'"),  # ' '
-        ("\u201c", '"'), ("\u201d", '"'),  # " "
-        # Dashes → comma or hyphen
-        ("\u2014", ", "),  # em dash —
-        ("\u2013", "-"),   # en dash –
-        # Ellipsis
-        ("\u2026", "..."),
-        # Other common problem chars
-        ("\u00b7", "."),   # middle dot ·
-        ("\u2022", "."),   # bullet •
+        # Non-breaking / zero-width spaces
         ("\u00a0", " "),   # non-breaking space
         ("\u200b", ""),    # zero-width space
+        # Bullets → period (not speakable)
+        ("\u00b7", "."),   # middle dot ·
+        ("\u2022", "."),   # bullet •
     ]
     for old, new in replacements:
         text = text.replace(old, new)
-    # Strip any remaining non-ASCII characters that aren't handled above
-    text = text.encode("ascii", errors="ignore").decode("ascii")
     # Normalize line endings and tabs
     text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\t", " ")
-    # Collapse 3+ consecutive newlines to a double newline (paragraph break).
-    # Double newlines (\n\n) are preserved so downstream code can render
-    # paragraph spacing.  Single newlines are kept as-is.
+    # Normalize newlines: only preserve \n\n as a paragraph break when it
+    # follows sentence-ending punctuation (.!?).  All other newlines
+    # (including double newlines mid-sentence) are collapsed to spaces —
+    # they're usually hard wraps from the source, not intentional breaks.
     text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"(?<=[.!?])\n\n", "\x00PARA\x00", text)  # protect real breaks
+    text = re.sub(r"\n", " ", text)                           # collapse all others
+    text = text.replace("\x00PARA\x00", "\n\n")               # restore real breaks
     # Collapse multiple spaces
     text = re.sub(r" {2,}", " ", text)
     return text.strip()

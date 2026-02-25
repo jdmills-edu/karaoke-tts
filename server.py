@@ -62,27 +62,30 @@ def generate_speech(
     available voices and confirm which voice to use before calling this tool.
     voice is required — do not omit it.
 
-    IMPORTANT: Before passing text to this tool, rewrite it to be
-    TTS-friendly. Apply ALL of the following transformations:
-      - Em dashes (—) and spaced hyphens ( - ) → comma or period for a natural pause
-      - Hyphens in compound words → space (e.g. "well-known" → "well known")
-      - % → "percent"
-      - $ → "dollars" (e.g. "$1.5M" → "1.5 million dollars")
-      - & → "and"
-      - @ → "at"
-      - # (number sign) → "number"
-      - / (as a separator) → "or" or "and" depending on context
-      - Large numbers → spoken form (e.g. 1,200,000 → "1.2 million",
-        42,300 → "42 thousand 300", 9.5 → "nine point five")
-      - Ordinals → spoken form (e.g. "1st" → "first", "3rd" → "third")
-      - Acronyms that should be spelled out → spaced letters
-        (e.g. "AI" → "A.I.", "GDP" → "G.D.P.")
-      - URLs and email addresses → omit or replace with a short description
-      - Markdown formatting (**, *, #, >, ---) → remove entirely
-      - Parenthetical asides → replace parens with commas
+    IMPORTANT: Before passing text to this tool, clean it up for speech.
+    Kokoro handles most punctuation and special characters natively
+    (hyphens, em dashes, %, $, &, parentheses, quotes, etc.), so do NOT
+    rewrite those. Only apply these minimal transformations:
+      - Decimal numbers → spoken form (e.g. "2.3" → "two point three",
+        "9.5" → "nine point five"). Kokoro treats the period as a
+        sentence pause instead of "point".
+      - Large comma-formatted numbers → spoken form (e.g. "1,200,000" →
+        "one point two million", "42,300" → "forty two thousand three
+        hundred"). Kokoro reads digit groups individually if commas are
+        present.
+      - Financial shorthand → spoken form (e.g. "$2.3B" → "two point
+        three billion dollars", "$1.5M" → "one point five million
+        dollars"). Kokoro reads the suffix letters literally.
+      - Business/technical abbreviations → spoken form (e.g. "Q4" →
+        "fourth quarter", "FY2024" → "fiscal year 2024").
+      - Decades → conversational form (e.g. "1980s" → "nineteen eighties",
+        not "nineteen hundred eighties").
+      - Remove Markdown formatting (**, *, #, >, ```, ---) entirely
+      - Remove or describe URLs and email addresses
+      - Remove any non-text artifacts (tables, bullet-point markers, etc.)
 
     Args:
-        text: TTS-friendly text to synthesize. Any length is supported.
+        text: Text to synthesize. Any length is supported.
         voice: Kokoro voice name (e.g. "af_heart", "am_michael").
         streaming: Stream audio to the browser as it is synthesized
                    (default True). Set to False for standard mode where
