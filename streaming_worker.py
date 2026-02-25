@@ -29,6 +29,7 @@ import soundfile as sf
 # Reuse helpers from the existing worker
 from worker import (
     PLAYER_TEMPLATE,
+    align_words,
     generate_player,
     resolve,
     sanitize_text,
@@ -839,6 +840,10 @@ def _blocking_synthesis(
                 tmp_path.unlink(missing_ok=True)
 
                 if refined_words:
+                    # Align Whisper words to source text: keep source
+                    # words (ground truth) with Whisper timings.
+                    refined_words = align_words(chunk, refined_words, _log=log)
+
                     # Transfer break flags by proportional index.
                     # Time-based overlap is fragile because Whisper
                     # and estimated timings can differ significantly.
