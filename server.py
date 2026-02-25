@@ -119,17 +119,12 @@ def generate_speech(
 
     notify("Generating Speech…", f"{engine} · {voice} · {len(text):,} chars")
 
-    log_path = ogg_path.with_suffix(".worker.log")
+    venv_python = Path(__file__).parent / ".venv" / "bin" / "python"
     subprocess.Popen(
-        [
-            "uv", "run",
-            "--project", str(Path(__file__).parent),
-            "python", str(WORKER_PATH),
-            str(params_file),
-        ],
+        [str(venv_python), str(WORKER_PATH), str(params_file)],
         start_new_session=True,
         stdout=subprocess.DEVNULL,
-        stderr=open(log_path, "w"),
+        stderr=subprocess.DEVNULL,
     )
 
     return (

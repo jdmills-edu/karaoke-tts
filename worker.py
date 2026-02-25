@@ -35,7 +35,8 @@ PLAYER_TEMPLATE = """<!DOCTYPE html>
       font-family: -apple-system, "Helvetica Neue", sans-serif;
       font-size: 26px;
       line-height: 1.9;
-      min-height: 100vh;
+      height: 100vh;
+      overflow: hidden;
       display: flex;
       flex-direction: column;
     }
@@ -70,6 +71,13 @@ PLAYER_TEMPLATE = """<!DOCTYPE html>
       gap: 16px;
       flex-shrink: 0;
     }
+    #playbtn {
+      background: none; border: none; cursor: pointer;
+      color: #f5c518; padding: 0; flex-shrink: 0;
+      display: flex; align-items: center;
+    }
+    #playbtn:hover { color: #fff; }
+    #playbtn svg { width: 28px; height: 28px; }
     #track {
       flex: 1; height: 3px; background: #1a1a2e;
       border-radius: 2px; cursor: pointer;
@@ -92,6 +100,11 @@ PLAYER_TEMPLATE = """<!DOCTYPE html>
   </div>
   <div id="scroll"><div id="text"></div></div>
   <div id="footer">
+    <button id="playbtn" title="Play / Pause">
+      <svg id="ico" viewBox="0 0 24 24" fill="currentColor">
+        <polygon id="play-shape" points="5,3 19,12 5,21"/>
+      </svg>
+    </button>
     <div id="track"><div id="fill"></div></div>
     <span id="time">0:00</span>
   </div>
@@ -104,15 +117,31 @@ PLAYER_TEMPLATE = """<!DOCTYPE html>
       s.className = "w"; s.id = "w" + i; s.textContent = w.word;
       txt.appendChild(s);
     });
-    const audio = document.getElementById("a");
-    const fill  = document.getElementById("fill");
-    const timeEl = document.getElementById("time");
-    const durEl  = document.getElementById("dur");
-    const spans  = W.map((_, i) => document.getElementById("w" + i));
+    const audio   = document.getElementById("a");
+    const fill    = document.getElementById("fill");
+    const timeEl  = document.getElementById("time");
+    const durEl   = document.getElementById("dur");
+    const playbtn = document.getElementById("playbtn");
+    const shape   = document.getElementById("play-shape");
+    const spans   = W.map((_, i) => document.getElementById("w" + i));
+
+    const PLAY_PATH  = "5,3 19,12 5,21";
+    const PAUSE_PATH = "6,3 6,21 10,21 10,3 M14,3 14,21 18,21 18,3";
+
     function fmt(s) {
       return Math.floor(s / 60) + ":" + String(Math.floor(s % 60)).padStart(2, "0");
     }
+    function updateBtn() {
+      shape.setAttribute("points", audio.paused ? PLAY_PATH : PAUSE_PATH);
+    }
+    playbtn.addEventListener("click", () => {
+      audio.paused ? audio.play() : audio.pause();
+    });
+    audio.addEventListener("play",  updateBtn);
+    audio.addEventListener("pause", updateBtn);
+    audio.addEventListener("ended", updateBtn);
     audio.addEventListener("loadedmetadata", () => { durEl.textContent = fmt(audio.duration); });
+
     let last = -1;
     audio.addEventListener("timeupdate", () => {
       const t = audio.currentTime;
@@ -155,6 +184,39 @@ def notify(title: str, message: str) -> None:
     )
 
 
+def sanitize_text(text: str) -> str:
+    """Normalize text for safe Kokoro/espeak-ng processing.
+
+    Collapses whitespace/newlines and replaces Unicode punctuation and
+    special characters that can cause native library crashes.
+    """
+    replacements = [
+        # Curly quotes → straight quotes
+        ("\u2018", "'"), ("\u2019", "'"),  # ' '
+        ("\u201c", '"'), ("\u201d", '"'),  # " "
+        # Dashes → comma or hyphen
+        ("\u2014", ", "),  # em dash —
+        ("\u2013", "-"),   # en dash –
+        # Ellipsis
+        ("\u2026", "..."),
+        # Other common problem chars
+        ("\u00b7", "."),   # middle dot ·
+        ("\u2022", "."),   # bullet •
+        ("\u00a0", " "),   # non-breaking space
+        ("\u200b", ""),    # zero-width space
+    ]
+    for old, new in replacements:
+        text = text.replace(old, new)
+    # Strip any remaining non-ASCII characters that aren't handled above
+    text = text.encode("ascii", errors="ignore").decode("ascii")
+    # Collapse newlines and tabs into spaces — phonemizer splits on newlines
+    # and an empty line from \n\n can crash espeak-ng
+    text = re.sub(r"[\r\n\t]+", " ", text)
+    # Collapse multiple spaces
+    text = re.sub(r" {2,}", " ", text)
+    return text.strip()
+
+
 def chunk_text(text: str, max_chars: int = 800) -> list[str]:
     sentences = re.split(r"(?<=[.!?])\s+", text.strip())
     chunks, current = [], ""
@@ -187,27 +249,51 @@ def generate_piper(text: str, voice: str, out_path: Path) -> None:
     sf.write(str(out_path), audio, chunks[0].sample_rate)
 
 
-def generate_kokoro(text: str, voice: str, out_path: Path, config: dict) -> None:
+def generate_kokoro(
+    text: str, voice: str, out_path: Path, config: dict,
+    _log=None,
+) -> None:
     from kokoro_onnx import Kokoro
     k = config["kokoro"]
     kokoro = Kokoro(str(resolve(k["model_path"])), str(resolve(k["voices_path"])))
     lang, speed = k.get("lang", "en-us"), k.get("speed", 1.0)
-    segments, sample_rate = [], None
-    for chunk in chunk_text(text):
-        samples, sr = kokoro.create(chunk, voice=voice, speed=speed, lang=lang)
-        segments.append(samples)
-        sample_rate = sr
-    audio = np.concatenate(segments) if len(segments) > 1 else segments[0]
-    sf.write(str(out_path), audio, sample_rate)
+    text = sanitize_text(text)
+    chunks = chunk_text(text)
+    if _log:
+        _log(f"kokoro: {len(chunks)} chunks, sizes={[len(c) for c in chunks]}")
+    # Stream-write each chunk directly to disk to avoid np.concatenate on a
+    # large in-memory buffer, which can trigger heap corruption in the ONNX runtime.
+    out_file = None
+    try:
+        for i, chunk in enumerate(chunks):
+            if _log:
+                _log(f"kokoro: chunk {i+1}/{len(chunks)} preview={repr(chunk[:80])}")
+            samples, sr = kokoro.create(chunk, voice=voice, speed=speed, lang=lang)
+            if _log:
+                _log(f"kokoro: chunk {i+1} done, {len(samples)} samples")
+            if out_file is None:
+                out_file = sf.SoundFile(
+                    str(out_path), mode="w", samplerate=sr, channels=1
+                )
+            out_file.write(samples)
+    finally:
+        if out_file is not None:
+            out_file.close()
 
 
 # ---------------------------------------------------------------------------
 # Word timestamps
 # ---------------------------------------------------------------------------
 
-def get_word_timestamps(audio_path: Path, model_size: str) -> list[dict]:
+def get_word_timestamps(audio_path: Path, model_size: str, _log=None) -> list[dict]:
+    import gc
+    gc.collect()  # free Kokoro/ONNX memory before loading Whisper
     from faster_whisper import WhisperModel
+    if _log:
+        _log("whisper: loading model")
     model = WhisperModel(model_size, device="cpu", compute_type="int8")
+    if _log:
+        _log("whisper: transcribing")
     segments, _ = model.transcribe(str(audio_path), word_timestamps=True)
     words = []
     for segment in segments:
@@ -218,6 +304,8 @@ def get_word_timestamps(audio_path: Path, model_size: str) -> list[dict]:
                     "start": round(w.start, 3),
                     "end": round(w.end, 3),
                 })
+    if _log:
+        _log(f"whisper: done, {len(words)} words")
     return words
 
 
@@ -255,19 +343,38 @@ def main() -> None:
     config       = params["config"]
     whisper_model = config.get("whisper_model", "small")
 
+    log_path = ogg_path.with_suffix(".worker.log")
+
+    def log(msg: str) -> None:
+        with open(log_path, "a") as f:
+            f.write(msg + "\n")
+            f.flush()
+
+    log(f"worker started: engine={engine} voice={voice} text_len={len(text)}")
+
     try:
+        log("step 1: TTS synthesis")
+        log(f"step 1: text preview: {repr(text[:200])}")
         if engine == "piper":
             generate_piper(text, voice, ogg_path)
         else:
-            generate_kokoro(text, voice, ogg_path, config)
+            generate_kokoro(text, voice, ogg_path, config, _log=log)
+        log(f"step 1 done: ogg_path={ogg_path} size={ogg_path.stat().st_size if ogg_path.exists() else 'MISSING'}")
 
         notify("Syncing words…", ogg_path.name)
-        words = get_word_timestamps(ogg_path, whisper_model)
+        log("step 2: word timestamps")
+        words = get_word_timestamps(ogg_path, whisper_model, _log=log)
+        log(f"step 2 done: {len(words)} words")
 
+        log("step 3: generate player")
         generate_player(words, engine, voice, ogg_path, html_path)
+        log("step 3 done: opening browser")
         notify("Karaoke Ready", ogg_path.stem)
         subprocess.run(["open", str(html_path)], check=False)
+        log("done")
     except Exception as e:
+        import traceback
+        log(f"EXCEPTION: {e}\n{traceback.format_exc()}")
         notify("Speech Failed", str(e))
         sys.exit(1)
 

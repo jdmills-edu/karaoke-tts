@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>karaoke-tts: Development Notes</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #0d0d1a;
+      color: #c8c8e0;
+      font-family: -apple-system, "Helvetica Neue", Arial, sans-serif;
+      font-size: 16px;
+      line-height: 1.75;
+    }
+    a { color: #f5c518; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Layout */
+    #sidebar {
+      position: fixed;
+      top: 0; left: 0;
+      width: 260px;
+      height: 100vh;
+      overflow-y: auto;
+      background: #080812;
+      border-right: 1px solid #1a1a2e;
+      padding: 32px 20px;
+    }
+    #content {
+      margin-left: 260px;
+      padding: 48px 64px;
+      max-width: 960px;
+    }
+
+    /* Sidebar */
+    #sidebar h2 {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: #44447a;
+      margin-bottom: 16px;
+    }
+    #sidebar ol {
+      list-style: none;
+      counter-reset: toc;
+    }
+    #sidebar ol li {
+      counter-increment: toc;
+      margin-bottom: 8px;
+    }
+    #sidebar ol li::before {
+      content: counter(toc) ". ";
+      color: #44447a;
+      font-size: 12px;
+    }
+    #sidebar a {
+      font-size: 13px;
+      color: #8888b8;
+    }
+    #sidebar a:hover { color: #f5c518; }
+
+    /* Headings */
+    h1 {
+      font-size: 28px;
+      font-weight: 700;
+      color: #f5c518;
+      margin-bottom: 8px;
+    }
+    .subtitle {
+      color: #44447a;
+      font-size: 14px;
+      margin-bottom: 48px;
+      border-bottom: 1px solid #1a1a2e;
+      padding-bottom: 24px;
+    }
+    h2 {
+      font-size: 20px;
+      font-weight: 700;
+      color: #e0e0ff;
+      margin: 56px 0 20px;
+      padding-top: 8px;
+      border-top: 1px solid #1a1a2e;
+    }
+    h2:first-of-type { margin-top: 0; border-top: none; }
+    h3 {
+      font-size: 15px;
+      font-weight: 700;
+      color: #f5c518;
+      margin: 28px 0 10px;
+      letter-spacing: 0.02em;
+    }
+
+    /* Body text */
+    p { margin-bottom: 14px; }
+    ul, ol { margin: 0 0 14px 24px; }
+    li { margin-bottom: 4px; }
+    strong { color: #fff; }
+    hr { border: none; border-top: 1px solid #1a1a2e; margin: 40px 0; }
+
+    /* Code */
+    code {
+      font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+      font-size: 13px;
+      background: #111128;
+      color: #a0d8ef;
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+    pre {
+      background: #0a0a1e;
+      border: 1px solid #1a1a2e;
+      border-left: 3px solid #f5c518;
+      border-radius: 6px;
+      padding: 18px 20px;
+      margin: 14px 0 20px;
+      overflow-x: auto;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      color: #c8e6ff;
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    /* Tables */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 14px 0 20px;
+      font-size: 14px;
+    }
+    th {
+      text-align: left;
+      color: #f5c518;
+      border-bottom: 1px solid #2a2a52;
+      padding: 8px 12px;
+      font-weight: 600;
+    }
+    td {
+      padding: 8px 12px;
+      border-bottom: 1px solid #1a1a2e;
+      color: #b8b8d8;
+    }
+    tr:last-child td { border-bottom: none; }
+
+    /* Callout boxes */
+    .warn {
+      background: #1a1000;
+      border-left: 3px solid #f5c518;
+      padding: 12px 16px;
+      border-radius: 0 6px 6px 0;
+      margin: 14px 0;
+      font-size: 14px;
+    }
+    .warn strong { color: #f5c518; }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #2a2a52; border-radius: 3px; }
+  </style>
+</head>
+<body>
+
+<nav id="sidebar">
+  <h2>Contents</h2>
+  <ol>
+    <li><a href="#s1">MCP Server Architecture</a></li>
+    <li><a href="#s2">Kokoro-ONNX: Crashes &amp; Workarounds</a></li>
+    <li><a href="#s3">Text Sanitization for TTS</a></li>
+    <li><a href="#s4">Memory Management: Kokoro + Whisper</a></li>
+    <li><a href="#s5">Faster-Whisper Notes</a></li>
+    <li><a href="#s6">Piper TTS API Changes</a></li>
+    <li><a href="#s7">Audio Format: OGG via SoundFile</a></li>
+    <li><a href="#s8">Debugging Native Crashes</a></li>
+    <li><a href="#s9">terminal-notifier on macOS 15</a></li>
+    <li><a href="#s10">Known Good Configuration</a></li>
+  </ol>
+</nav>
+
+<main id="content">
+
+  <h1>karaoke-tts: Development Notes &amp; Lessons Learned</h1>
+  <p class="subtitle">Hard-won notes from building this project. Read this before touching the synthesis pipeline, the MCP server architecture, or the background worker.</p>
+
+  <!-- ------------------------------------------------------------------ -->
+  <h2 id="s1">1. MCP Server Architecture</h2>
+
+  <h3>The core problem: MCP kills background threads</h3>
+  <p>The MCP framework (FastMCP / <code>mcp[cli]</code>) calls <code>os._exit()</code> when the transport closes. This kills <strong>all</strong> threads — including daemon and non-daemon — with no chance to clean up. Any threading-based background work will be silently terminated.</p>
+  <div class="warn"><strong>Do not use threads for long-running synthesis.</strong> They will be killed.</div>
+
+  <h3>Solution: fully detached subprocess</h3>
+  <p>Launch <code>worker.py</code> as a subprocess in a new session:</p>
+  <pre><code>subprocess.Popen(
+    [str(venv_python), str(WORKER_PATH), str(params_file)],
+    start_new_session=True,   # new session → immune to SIGHUP, parent death
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)</code></pre>
+  <p><code>start_new_session=True</code> creates a new process group and session. The worker survives the MCP server exiting or being killed.</p>
+
+  <h3>Use the venv Python explicitly</h3>
+  <p>Do <strong>not</strong> use <code>sys.executable</code> when launching the worker. Under <code>uv run</code>, <code>sys.executable</code> may resolve to something that can't load the project's packages in the detached session.</p>
+  <pre><code>venv_python = Path(__file__).parent / ".venv" / "bin" / "python"</code></pre>
+
+  <h3>Pass parameters via a temp JSON file</h3>
+  <p>The worker receives a JSON file path as <code>sys.argv[1]</code> — not via stdin or env vars, both of which are unreliable with fully detached processes.</p>
+  <pre><code>params_file = Path(tempfile.mktemp(suffix=".json"))
+params_file.write_text(json.dumps({...}))
+# worker deletes it after reading: params_file.unlink(missing_ok=True)</code></pre>
+
+  <!-- ------------------------------------------------------------------ -->
+  <h2 id="s2">2. Kokoro-ONNX: Crashes &amp; Workarounds</h2>
+
+  <h3>Version situation</h3>
+  <ul>
+    <li><strong>Installed</strong>: <code>kokoro-onnx==0.5.0</code> (not on PyPI as of Feb 2026; PyPI latest is 0.4.7)</li>
+    <li><strong>Dependency</strong>: uses <code>phonemizer-fork</code> + <code>espeakng-loader</code> for phonemization</li>
+    <li><strong>Stack</strong>: Python → kokoro-onnx → phonemizer-fork → espeak-ng (native C library)</li>
+  </ul>
+  <div class="warn">Crashes in espeak-ng produce <strong>SIGSEGV</strong> — a native signal that Python's <code>try/except Exception</code> <strong>cannot catch</strong>. The process dies silently.</div>
+
+  <h3>Crash #1: Double newlines create empty espeak-ng inputs</h3>
+  <p><code>phonemizer.phonemize()</code> splits its input on <code>\n</code>. A double newline (<code>\n\n</code>) produces an empty string in the middle of the list. Passing <code>""</code> to espeak-ng causes a segfault.</p>
+  <p><strong>Fix</strong>: collapse all newlines to spaces before synthesizing.</p>
+  <pre><code>text = re.sub(r"[\r\n\t]+", " ", text)</code></pre>
+
+  <h3>Crash #2: np.concatenate triggers heap corruption</h3>
+  <p>After synthesizing many chunks (4–5+), calling <code>np.concatenate(segments)</code> on the collected audio arrays reliably causes a SIGSEGV. The crash does <em>not</em> happen inside <code>kokoro.create()</code> itself — all chunks succeed — but the subsequent concatenation corrupts memory.</p>
+  <p><strong>Root cause</strong>: repeated ONNX Runtime inference calls accumulate heap corruption in the native runtime. Numpy's <code>concatenate</code> then touches the corrupted regions.</p>
+  <p><strong>Fix</strong>: stream-write each chunk directly to the output file instead of accumulating arrays in memory:</p>
+  <pre><code>out_file = None
+try:
+    for chunk in chunks:
+        samples, sr = kokoro.create(chunk, ...)
+        if out_file is None:
+            out_file = sf.SoundFile(str(out_path), mode="w", samplerate=sr, channels=1)
+        out_file.write(samples)
+finally:
+    if out_file is not None:
+        out_file.close()</code></pre>
+
+  <h3>Crash #3: Unicode characters in input</h3>
+  <p>Certain Unicode characters (em dashes, curly quotes, ellipsis, etc.) can trigger crashes in espeak-ng's phonemizer. The MCP tool docstring instructs the LLM to normalize text, but this cannot be relied upon — always sanitize in the worker. See <a href="#s3">§3</a>.</p>
+
+  <h3>Chunk size</h3>
+  <p>Keep chunks to ≤ 800 characters. The kokoro-onnx library itself has a <code>MAX_PHONEME_LENGTH</code> limit, and sentence-boundary chunking at 800 chars stays well within it. Smaller chunks (300–400 chars) are safer but slower.</p>
+
+  <!-- ------------------------------------------------------------------ -->
+  <h2 id="s3">3. Text Sanitization for TTS</h2>
+  <p>Always run <code>sanitize_text()</code> on input before passing to any TTS engine. The LLM may skip normalization even when instructed. The worker must be defensive.</p>
+  <pre><code>def sanitize_text(text: str) -> str:
+    replacements = [
+        ("\u2018", "'"), ("\u2019", "'"),   # curly single quotes
+        ("\u201c", '"'), ("\u201d", '"'),    # curly double quotes
+        ("\u2014", ", "),                    # em dash → comma-space
+        ("\u2013", "-"),                     # en dash → hyphen
+        ("\u2026", "..."),                   # ellipsis
+        ("\u00b7", "."),                     # middle dot
+        ("\u2022", "."),                     # bullet
+        ("\u00a0", " "),                     # non-breaking space
+        ("\u200b", ""),                      # zero-width space
+    ]
+    for old, new in replacements:
+        text = text.replace(old, new)
+    text = text.encode("ascii", errors="ignore").decode("ascii")
+    text = re.sub(r"[\r\n\t]+", " ", text)   # CRITICAL: collapse newlines
+    text = re.sub(r" {2,}", " ", text)
+    return text.strip()</code></pre>
+  <p>The <code>encode("ascii", errors="ignore")</code> catches any Unicode that slipped through the explicit replacements.</p>
+
+  <!-- ------------------------------------------------------------------ -->
+  <h2 id="s4">4. Memory Management: Kokoro + Whisper Together</h2>
+
+  <h3>The problem</h3>
+  <p>Kokoro loads a <strong>310 MB</strong> ONNX model. Faster-whisper (small) loads a <strong>460 MB</strong> model. Running them back-to-back in the same Python process hits ~800 MB+ of model memory, which can trigger macOS's memory pressure killer (jetsam) or cause a native crash when the Whisper model tries to allocate.</p>
+
+  <h3>Fix: force garbage collection between stages</h3>
+  <p>After <code>generate_kokoro()</code> returns, the local <code>kokoro</code> variable goes out of scope but the ONNX Runtime may keep internal caches. Call <code>gc.collect()</code> before loading Whisper:</p>
+  <pre><code>def get_word_timestamps(audio_path, model_size):
+    import gc
+    gc.collect()                    # release Kokoro/ONNX memory
+    from faster_whisper import WhisperModel
+    model = WhisperModel(model_size, device="cpu", compute_type="int8")
+    ...</code></pre>
+  <p>The stream-write approach in <a href="#s2">§2</a> also helps: since audio is never accumulated in a large numpy array, peak memory during synthesis is lower.</p>
+
+  <!-- ------------------------------------------------------------------ -->
+  <h2 id="s5">5. Faster-Whisper Notes</h2>
+  <ul>
+    <li>Model: <code>small</code> is a good default (460 MB, fast, accurate for clean TTS audio)</li>
+    <li><code>compute_type="int8"</code> halves memory vs <code>float16</code> with minimal accuracy loss</li>
+    <li><code>word_timestamps=True</code> is what drives the karaoke highlighting</li>
+    <li>Faster-whisper works reliably when run after Kokoro as long as memory is freed first (see <a href="#s4">§4</a>)</li>
+    <li>The <code>segments</code> iterator is <strong>lazy</strong> — consume it fully before doing anything else, otherwise the model may be freed prematurely</li>
+  </ul>
+  <pre><code>segments, _ = model.transcribe(str(audio_path), word_timestamps=True)
+words = []
+for segment in segments:           # fully consume the iterator
+    if segment.words:
+        for w in segment.words:
+            words.append({"word": w.word, "start": ..., "end": ...})</code></pre>
+
+  <!-- ------------------------------------------------------------------ -->
+  <h2 id="s6">6. Piper TTS API Changes</h2>
+  <div class="warn"><strong>Piper v1.4+ broke the old wave-file API.</strong> <code>synthesize()</code> no longer accepts a <code>wave.Wave_write</code> object. It now returns <code>Iterable[AudioChunk]</code>.</div>
+
+  <h3>Old (broken, ≤ v1.3):</h3>
+  <pre><code>with wave.open(path, "w") as wf:
+    voice.synthesize(text, wf)      # no longer works</code></pre>
+
+  <h3>New (correct, v1.4+):</h3>
+  <pre><code>chunks = list(voice.synthesize(text))
+if not chunks:
+    raise RuntimeError("Piper produced no audio")
+audio = np.concatenate([c.audio_float_array for c in chunks])
+sf.write(str(out_path), audio, chunks[0].sample_rate)</code></pre>
+  <p>Key fields on <code>AudioChunk</code>:</p>
+  <ul>
+    <li><code>audio_float_array</code> — float32 numpy array, range [−1.0, 1.0]</li>
+    <li><code>sample_rate</code> — typically 22050 Hz</li>
+    <li><code>sample_width</code> — bytes per sample (2 = 16-bit)</li>
+    <li><code>sample_channels</code> — number of channels</li>
+  </ul>
+
+  <!-- ------------------------------------------------------------------ -->
+  <h2 id="s7">7. Audio Format: OGG via SoundFile</h2>
+  <p>OGG Vorbis is ~8× smaller than WAV for the same audio. <code>soundfile</code> writes OGG natively — just use a <code>.ogg</code> extension in the output path.</p>
+  <p><strong>Streaming write</strong> (preferred for multi-chunk synthesis):</p>
+  <pre><code>with sf.SoundFile(path, mode="w", samplerate=sr, channels=1) as f:
+    for chunk_audio in chunks:
+        f.write(chunk_audio)</code></pre>
+  <p><strong>Single write:</strong></p>
+  <pre><code>sf.write(str(path), audio_array, sample_rate)</code></pre>
+  <div class="warn">A <strong>3446-byte OGG file</strong> means the file was created (headers written) but synthesis was interrupted before any audio frames were flushed — diagnostic indicator of a native crash mid-synthesis.</div>
+
+  <!-- ------------------------------------------------------------------ -->
+  <h2 id="s8">8. Debugging Native Crashes</h2>
+  <p>Native library crashes (SIGSEGV) are invisible to Python's exception handling. Symptoms:</p>
+  <ul>
+    <li>Worker log truncated mid-step with no exception message</li>
+    <li>Tiny OGG file (headers only, ~3446 bytes), no HTML</li>
+    <li>Worker log is 0 bytes (stderr redirect captures nothing from a SIGSEGV)</li>
+  </ul>
+
+  <h3>Essential: write your own log file with explicit flush</h3>
+  <p>Do <strong>not</strong> rely on stderr redirection to capture errors from native crashes. Instead, write directly to a <code>.worker.log</code> file from Python with <code>flush()</code> after every step:</p>
+  <pre><code>def log(msg):
+    with open(log_path, "a") as f:
+        f.write(msg + "\n")
+        f.flush()          # CRITICAL: flush ensures partial logs survive kills</code></pre>
+
+  <h3>Debugging workflow</h3>
+  <ol>
+    <li>Run <code>worker.py</code> directly from the command line to get stderr output</li>
+    <li>Reproduce with increasing text lengths to find the size threshold</li>
+    <li>Add per-chunk logging inside the synthesis loop to find which chunk crashes</li>
+    <li>Test the problematic text fragment in isolation to confirm the trigger</li>
+  </ol>
+
+  <h3>The "0-byte log" problem</h3>
+  <p>If the worker produces a 0-byte log <strong>and</strong> a 3446-byte OGG, the crash happens <em>after</em> <code>sf.SoundFile</code> is opened but <em>before</em> any audio frames are written. This is typical of a crash during the first <code>kokoro.create()</code> call.</p>
+  <p>If the worker produces a 0-byte log <strong>and no OGG</strong>, Python is crashing before synthesis even begins — check imports, venv path, and params file.</p>
+
+  <!-- ------------------------------------------------------------------ -->
+  <h2 id="s9">9. terminal-notifier on macOS 15</h2>
+  <p>Several <code>terminal-notifier</code> flags are silently broken on macOS 15 (Sequoia):</p>
+  <table>
+    <tr><th>Flag</th><th>Status</th></tr>
+    <tr><td><code>-sender com.apple.Terminal</code></td><td>Silently <strong>suppresses all notifications</strong></td></tr>
+    <tr><td><code>-open &lt;url&gt;</code></td><td>Does nothing</td></tr>
+    <tr><td><code>-execute &lt;command&gt;</code></td><td>Does nothing</td></tr>
+  </table>
+  <p><strong>Use only</strong> <code>-title</code> and <code>-message</code>. No <code>-sender</code>, no <code>-open</code>, no <code>-execute</code>.</p>
+  <pre><code>subprocess.run(
+    ["terminal-notifier", "-title", title, "-message", message],
+    check=False,
+)</code></pre>
+
+  <!-- ------------------------------------------------------------------ -->
+  <h2 id="s10">10. Known Good Configuration</h2>
+  <p>Tested and working as of February 2026:</p>
+  <table>
+    <tr><th>Component</th><th>Version</th><th>Notes</th></tr>
+    <tr><td>Python</td><td>3.12.9</td><td>via uv/cpython</td></tr>
+    <tr><td>kokoro-onnx</td><td>0.5.0</td><td>Not on PyPI; stream-write required</td></tr>
+    <tr><td>faster-whisper</td><td>≥ 1.0.0</td><td><code>small</code> model, <code>int8</code> compute</td></tr>
+    <tr><td>soundfile</td><td>≥ 0.12.0</td><td>OGG Vorbis output</td></tr>
+    <tr><td>piper-tts</td><td>≥ 1.4.1</td><td>New <code>AudioChunk</code> API</td></tr>
+    <tr><td>mcp[cli]</td><td>≥ 1.0.0</td><td>FastMCP</td></tr>
+    <tr><td>terminal-notifier</td><td>any</td><td>macOS 15: use <code>-title</code>/<code>-message</code> only</td></tr>
+  </table>
+  <p><strong>Kokoro models</strong> (download separately):</p>
+  <ul>
+    <li><code>kokoro-v1.0.onnx</code> — 310 MB</li>
+    <li><code>voices-v1.0.bin</code> — 28 MB</li>
+  </ul>
+  <p><strong>Whisper model</strong> — downloads automatically to <code>~/.cache/huggingface/</code> on first use.</p>
+  <p><strong>Piper model</strong> (optional): <code>en_US-lessac-medium.onnx</code> + <code>.json</code> — ~60 MB — from HuggingFace rhasspy/piper-voices.</p>
+
+</main>
+</body>
+</html>
