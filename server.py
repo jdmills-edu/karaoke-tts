@@ -50,10 +50,21 @@ def generate_speech(
     text: str,
     engine: str,
     voice: str,
+    streaming: bool = True,
     output_path: str = None,
 ) -> str:
-    """Synthesize speech then open a karaoke browser player with word-by-word
+    """Synthesize speech and open a karaoke browser player with word-by-word
     highlighting synchronized to the audio.
+
+    By default, streaming mode is enabled: audio starts playing in the browser
+    almost immediately while synthesis continues in the background.  Streaming
+    uses the Web Audio API and WebSocket to deliver audio chunk by chunk with
+    estimated word timings, which are automatically refined by Whisper after
+    synthesis completes.  Streaming is only supported with the kokoro engine;
+    if engine is "piper", streaming is ignored and standard mode is used.
+
+    In standard (non-streaming) mode, synthesis completes fully before the
+    browser opens.
 
     IMPORTANT: Always call list_kokoro_voices first to show the user the
     available voices and confirm which engine and voice to use before
@@ -78,19 +89,16 @@ def generate_speech(
       - Markdown formatting (**, *, #, >, ---) → remove entirely
       - Parenthetical asides → replace parens with commas
 
-    This tool returns immediately. Three stages run in the background:
-      1. TTS synthesis (Piper or Kokoro)
-      2. Word-timestamp extraction (faster-whisper)
-      3. Karaoke player generation + browser launch
-    A macOS notification fires at each stage. Do not wait or poll —
-    tell the user generation is underway and they'll be notified.
-
     Args:
         text: TTS-friendly text to synthesize. Any length is supported.
         engine: TTS engine — must be "piper" or "kokoro".
         voice: Voice identifier (required).
                Piper: path to a .onnx model file.
                Kokoro: voice name (e.g. "af_heart", "am_michael").
+        streaming: Stream audio to the browser as it is synthesized
+                   (default True). Only supported with kokoro engine;
+                   ignored for piper. Set to False for standard mode
+                   where the browser opens after synthesis completes.
         output_path: Optional custom path for the OGG file.
                      The HTML player is saved alongside it automatically.
 
@@ -101,13 +109,14 @@ def generate_speech(
     if engine not in ("piper", "kokoro"):
         raise ValueError(f"Unknown engine {engine!r}. Must be 'piper' or 'kokoro'.")
 
+    use_streaming = streaming and engine == "kokoro"
+
     if output_path:
         ogg_path = resolve(output_path)
         html_path = ogg_path.with_suffix(".html")
     else:
         ogg_path, html_path = make_output_paths(config)
 
-    # Write params to a temp file and launch worker as a fully detached process
     params_file = Path(tempfile.mktemp(suffix=".json"))
     params_file.write_text(json.dumps({
         "text": text,
@@ -118,15 +127,30 @@ def generate_speech(
         "config": config,
     }))
 
-    notify("Generating Speech…", f"{engine} · {voice} · {len(text):,} chars")
-
     venv_python = Path(__file__).parent / ".venv" / "bin" / "python"
+    worker = STREAMING_WORKER_PATH if use_streaming else WORKER_PATH
+
+    if use_streaming:
+        notify("Streaming Speech…", f"{engine} · {voice} · {len(text):,} chars")
+    else:
+        notify("Generating Speech…", f"{engine} · {voice} · {len(text):,} chars")
+
     subprocess.Popen(
-        [str(venv_python), str(WORKER_PATH), str(params_file)],
+        [str(venv_python), str(worker), str(params_file)],
         start_new_session=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+
+    if use_streaming:
+        return (
+            f"Streaming speech generation started ({engine} · {voice}).\n"
+            f"A browser window will open with the streaming player.\n"
+            f"Audio plays immediately as each chunk is synthesized.\n\n"
+            f"Archival audio:  {ogg_path}\n"
+            f"Archival player: {html_path}\n\n"
+            f"Do not wait or poll — tell the user it's underway."
+        )
 
     return (
         f"Speech generation is running in the background ({engine} · {voice}). "
@@ -141,95 +165,10 @@ def generate_speech(
 
 
 @mcp.tool()
-def generate_speech_streaming(
-    text: str,
-    engine: str,
-    voice: str,
-    output_path: str = None,
-) -> str:
-    """Synthesize speech with streaming playback — audio starts playing
-    in the browser almost immediately while synthesis continues in the
-    background.  Word-by-word karaoke highlighting runs in real time
-    using estimated timings that are automatically refined by Whisper
-    after synthesis completes.
-
-    IMPORTANT: Always call list_kokoro_voices first to show the user the
-    available voices and confirm which engine and voice to use before
-    calling this tool. engine and voice are required — do not omit them.
-
-    IMPORTANT: Before passing text to this tool, rewrite it to be
-    TTS-friendly.  Apply ALL of the following transformations:
-      - Em dashes and spaced hyphens → comma or period for a natural pause
-      - Hyphens in compound words → space
-      - % → "percent", $ → "dollars", & → "and", @ → "at"
-      - # (number sign) → "number"
-      - / (as a separator) → "or" or "and" depending on context
-      - Large numbers → spoken form
-      - Ordinals → spoken form
-      - Acronyms → spaced letters (e.g. "AI" → "A.I.")
-      - URLs / email → omit or short description
-      - Markdown formatting → remove entirely
-      - Parenthetical asides → replace parens with commas
-
-    This tool starts a local HTTP + WebSocket server and opens the
-    browser immediately.  Audio streams chunk by chunk as it is
-    synthesized.  After all chunks finish, Whisper refines the word
-    timings and an archival OGG + HTML pair is saved.
-
-    Args:
-        text: TTS-friendly text to synthesize. Any length is supported.
-        engine: Must be "kokoro" (streaming not supported for piper).
-        voice: Kokoro voice name (e.g. "af_heart", "am_michael").
-        output_path: Optional custom path for the archival OGG file.
-
-    Returns:
-        Confirmation with streaming info and archival paths.
-    """
-    if engine != "kokoro":
-        raise ValueError("Streaming mode only supports kokoro engine.")
-
-    config = load_config()
-    if output_path:
-        ogg_path = resolve(output_path)
-        html_path = ogg_path.with_suffix(".html")
-    else:
-        ogg_path, html_path = make_output_paths(config)
-
-    params_file = Path(tempfile.mktemp(suffix=".json"))
-    params_file.write_text(json.dumps({
-        "text": text,
-        "engine": engine,
-        "voice": voice,
-        "ogg_path": str(ogg_path),
-        "html_path": str(html_path),
-        "config": config,
-    }))
-
-    notify("Streaming Speech…", f"{engine} · {voice} · {len(text):,} chars")
-
-    venv_python = Path(__file__).parent / ".venv" / "bin" / "python"
-    subprocess.Popen(
-        [str(venv_python), str(STREAMING_WORKER_PATH), str(params_file)],
-        start_new_session=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-
-    return (
-        f"Streaming speech generation started ({engine} · {voice}).\n"
-        f"A browser window will open with the streaming player.\n"
-        f"Audio plays immediately as each chunk is synthesized.\n\n"
-        f"Archival audio:  {ogg_path}\n"
-        f"Archival player: {html_path}\n\n"
-        f"Do not wait or poll — tell the user it's underway."
-    )
-
-
-@mcp.tool()
 def list_kokoro_voices() -> str:
-    """List all available Kokoro voice names and present them to the user as a
-    pick list so they can select one before generating speech. After the user
-    makes a selection, proceed to call generate_speech with their chosen voice."""
+    """List all available Kokoro voice names and present them as a pick list
+    so the user can select one before generating speech. After the user makes
+    a selection, proceed to call generate_speech with their chosen voice."""
     voices = {
         "af_heart":    "American Female — Heart (warm, natural)",
         "af_bella":    "American Female — Bella",

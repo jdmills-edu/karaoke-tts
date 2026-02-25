@@ -6,32 +6,33 @@ Forked from [local-hq-tts](https://github.com/jdmills-edu/local-hq-tts).
 
 ## How it works
 
-### Standard mode (`generate_speech`)
+### Streaming mode (default)
 
-1. Claude calls `generate_speech` with your text, engine, and voice
-2. TTS synthesis runs in the background (Piper or Kokoro)
-3. faster-whisper transcribes the audio to extract word-level timestamps
-4. A self-contained HTML player is generated and opened in your browser
-5. macOS notifications fire at each stage
-
-### Streaming mode (`generate_speech_streaming`)
-
-1. Claude calls `generate_speech_streaming` — a local HTTP + WebSocket server starts and the browser opens immediately
+1. Claude calls `generate_speech` — a local HTTP + WebSocket server starts and the browser opens immediately
 2. Kokoro synthesizes audio in small chunks (~200 chars each, ~2-5s of audio)
 3. Each chunk streams to the browser over WebSocket and plays immediately with estimated word timings
 4. After all chunks finish, Whisper refines the word timings and an archival OGG + HTML pair is saved
 
 Streaming mode typically plays the first audio within 2-4 seconds of starting synthesis, compared to 30-90+ seconds for full synthesis in standard mode.
 
+### Standard mode (`streaming=False`)
+
+1. Claude calls `generate_speech` with `streaming=False`
+2. TTS synthesis runs in the background (Piper or Kokoro)
+3. faster-whisper transcribes the audio to extract word-level timestamps
+4. A self-contained HTML player is generated and opened in your browser
+5. macOS notifications fire at each stage
+
 ## Tools
 
 | Tool | Description |
 |------|-------------|
-| `generate_speech` | Synthesize text → karaoke player (Piper or Kokoro) |
-| `generate_speech_streaming` | Stream audio to browser as it's synthesized (Kokoro only) |
+| `generate_speech` | Synthesize text → karaoke player. Streams by default (Kokoro). |
 | `list_kokoro_voices` | List available Kokoro voice names |
 
 `engine` and `voice` are required. Claude will always call `list_kokoro_voices` first.
+
+`streaming` defaults to `True`. When enabled with Kokoro, audio plays in the browser within seconds. Set `streaming=False` for standard mode (full synthesis before playback). Streaming is ignored for Piper.
 
 ## Prerequisites
 
