@@ -2,8 +2,6 @@
 
 A local MCP server that synthesizes speech and opens a karaoke-style browser player with word-by-word highlighting synchronized to the audio. Built on [Kokoro](https://github.com/thewh1teagle/kokoro-onnx) for TTS and [faster-whisper](https://github.com/SYSTRAN/faster-whisper) for word timestamps.
 
-Forked from [local-hq-tts](https://github.com/jdmills-edu/local-hq-tts).
-
 ## How it works
 
 ### Streaming mode (default)
