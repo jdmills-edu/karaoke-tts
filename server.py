@@ -17,6 +17,7 @@ from mcp.server.fastmcp import FastMCP
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
 WORKER_PATH = Path(__file__).parent / "worker.py"
+STREAMING_WORKER_PATH = Path(__file__).parent / "streaming_worker.py"
 
 mcp = FastMCP("karaoke-tts")
 
@@ -136,6 +137,91 @@ def generate_speech(
         f"Audio:  {ogg_path}\n"
         f"Player: {html_path}\n\n"
         f"Do not wait or poll — let the user know it's underway."
+    )
+
+
+@mcp.tool()
+def generate_speech_streaming(
+    text: str,
+    engine: str,
+    voice: str,
+    output_path: str = None,
+) -> str:
+    """Synthesize speech with streaming playback — audio starts playing
+    in the browser almost immediately while synthesis continues in the
+    background.  Word-by-word karaoke highlighting runs in real time
+    using estimated timings that are automatically refined by Whisper
+    after synthesis completes.
+
+    IMPORTANT: Always call list_kokoro_voices first to show the user the
+    available voices and confirm which engine and voice to use before
+    calling this tool. engine and voice are required — do not omit them.
+
+    IMPORTANT: Before passing text to this tool, rewrite it to be
+    TTS-friendly.  Apply ALL of the following transformations:
+      - Em dashes and spaced hyphens → comma or period for a natural pause
+      - Hyphens in compound words → space
+      - % → "percent", $ → "dollars", & → "and", @ → "at"
+      - # (number sign) → "number"
+      - / (as a separator) → "or" or "and" depending on context
+      - Large numbers → spoken form
+      - Ordinals → spoken form
+      - Acronyms → spaced letters (e.g. "AI" → "A.I.")
+      - URLs / email → omit or short description
+      - Markdown formatting → remove entirely
+      - Parenthetical asides → replace parens with commas
+
+    This tool starts a local HTTP + WebSocket server and opens the
+    browser immediately.  Audio streams chunk by chunk as it is
+    synthesized.  After all chunks finish, Whisper refines the word
+    timings and an archival OGG + HTML pair is saved.
+
+    Args:
+        text: TTS-friendly text to synthesize. Any length is supported.
+        engine: Must be "kokoro" (streaming not supported for piper).
+        voice: Kokoro voice name (e.g. "af_heart", "am_michael").
+        output_path: Optional custom path for the archival OGG file.
+
+    Returns:
+        Confirmation with streaming info and archival paths.
+    """
+    if engine != "kokoro":
+        raise ValueError("Streaming mode only supports kokoro engine.")
+
+    config = load_config()
+    if output_path:
+        ogg_path = resolve(output_path)
+        html_path = ogg_path.with_suffix(".html")
+    else:
+        ogg_path, html_path = make_output_paths(config)
+
+    params_file = Path(tempfile.mktemp(suffix=".json"))
+    params_file.write_text(json.dumps({
+        "text": text,
+        "engine": engine,
+        "voice": voice,
+        "ogg_path": str(ogg_path),
+        "html_path": str(html_path),
+        "config": config,
+    }))
+
+    notify("Streaming Speech…", f"{engine} · {voice} · {len(text):,} chars")
+
+    venv_python = Path(__file__).parent / ".venv" / "bin" / "python"
+    subprocess.Popen(
+        [str(venv_python), str(STREAMING_WORKER_PATH), str(params_file)],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    return (
+        f"Streaming speech generation started ({engine} · {voice}).\n"
+        f"A browser window will open with the streaming player.\n"
+        f"Audio plays immediately as each chunk is synthesized.\n\n"
+        f"Archival audio:  {ogg_path}\n"
+        f"Archival player: {html_path}\n\n"
+        f"Do not wait or poll — tell the user it's underway."
     )
 
 

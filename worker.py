@@ -102,7 +102,7 @@ PLAYER_TEMPLATE = """<!DOCTYPE html>
   <div id="footer">
     <button id="playbtn" title="Play / Pause">
       <svg id="ico" viewBox="0 0 24 24" fill="currentColor">
-        <polygon id="play-shape" points="5,3 19,12 5,21"/>
+        <path id="play-shape" d="M5,3 L19,12 L5,21 Z"/>
       </svg>
     </button>
     <div id="track"><div id="fill"></div></div>
@@ -113,6 +113,7 @@ PLAYER_TEMPLATE = """<!DOCTYPE html>
     const W = __WORDS__;
     const txt = document.getElementById("text");
     W.forEach((w, i) => {
+      if (w.break) for (let b = 0; b < w.break; b++) txt.appendChild(document.createElement("br"));
       const s = document.createElement("span");
       s.className = "w"; s.id = "w" + i; s.textContent = w.word;
       txt.appendChild(s);
@@ -125,14 +126,14 @@ PLAYER_TEMPLATE = """<!DOCTYPE html>
     const shape   = document.getElementById("play-shape");
     const spans   = W.map((_, i) => document.getElementById("w" + i));
 
-    const PLAY_PATH  = "5,3 19,12 5,21";
-    const PAUSE_PATH = "6,3 6,21 10,21 10,3 M14,3 14,21 18,21 18,3";
+    const PLAY_PATH  = "M5,3 L19,12 L5,21 Z";
+    const PAUSE_PATH = "M6,3 L10,3 L10,21 L6,21 Z M14,3 L18,3 L18,21 L14,21 Z";
 
     function fmt(s) {
       return Math.floor(s / 60) + ":" + String(Math.floor(s % 60)).padStart(2, "0");
     }
     function updateBtn() {
-      shape.setAttribute("points", audio.paused ? PLAY_PATH : PAUSE_PATH);
+      shape.setAttribute("d", audio.paused ? PLAY_PATH : PAUSE_PATH);
     }
     playbtn.addEventListener("click", () => {
       audio.paused ? audio.play() : audio.pause();
@@ -209,9 +210,12 @@ def sanitize_text(text: str) -> str:
         text = text.replace(old, new)
     # Strip any remaining non-ASCII characters that aren't handled above
     text = text.encode("ascii", errors="ignore").decode("ascii")
-    # Collapse newlines and tabs into spaces — phonemizer splits on newlines
-    # and an empty line from \n\n can crash espeak-ng
-    text = re.sub(r"[\r\n\t]+", " ", text)
+    # Normalize line endings and tabs
+    text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\t", " ")
+    # Collapse 3+ consecutive newlines to a double newline (paragraph break).
+    # Double newlines (\n\n) are preserved so downstream code can render
+    # paragraph spacing.  Single newlines are kept as-is.
+    text = re.sub(r"\n{3,}", "\n\n", text)
     # Collapse multiple spaces
     text = re.sub(r" {2,}", " ", text)
     return text.strip()

@@ -178,6 +178,7 @@
     <li><a href="#s8">Debugging Native Crashes</a></li>
     <li><a href="#s9">terminal-notifier on macOS 15</a></li>
     <li><a href="#s10">Known Good Configuration</a></li>
+    <li><a href="#s11">Streaming TTS Architecture</a></li>
   </ol>
 </nav>
 
@@ -224,10 +225,9 @@ params_file.write_text(json.dumps({...}))
   </ul>
   <div class="warn">Crashes in espeak-ng produce <strong>SIGSEGV</strong> — a native signal that Python's <code>try/except Exception</code> <strong>cannot catch</strong>. The process dies silently.</div>
 
-  <h3>Crash #1: Double newlines create empty espeak-ng inputs</h3>
-  <p><code>phonemizer.phonemize()</code> splits its input on <code>\n</code>. A double newline (<code>\n\n</code>) produces an empty string in the middle of the list. Passing <code>""</code> to espeak-ng causes a segfault.</p>
-  <p><strong>Fix</strong>: collapse all newlines to spaces before synthesizing.</p>
-  <pre><code>text = re.sub(r"[\r\n\t]+", " ", text)</code></pre>
+  <h3><s>Crash #1: Double newlines</s> (Disproven)</h3>
+  <p>Early development attributed espeak-ng segfaults to newlines in the input text. This was a misdiagnosis — the crashes were actually caused by concurrent bugs (heap corruption from <code>np.concatenate</code>, Unicode characters). Kokoro/espeak-ng handles both single and double newlines without issues.</p>
+  <p><strong>Newlines are safe.</strong> <code>sanitize_text()</code> preserves <code>\n</code> and <code>\n\n</code> (paragraph breaks). Only runs of 3+ consecutive newlines are collapsed to <code>\n\n</code>.</p>
 
   <h3>Crash #2: np.concatenate triggers heap corruption</h3>
   <p>After synthesizing many chunks (4–5+), calling <code>np.concatenate(segments)</code> on the collected audio arrays reliably causes a SIGSEGV. The crash does <em>not</em> happen inside <code>kokoro.create()</code> itself — all chunks succeed — but the subsequent concatenation corrupts memory.</p>
@@ -268,10 +268,13 @@ finally:
     for old, new in replacements:
         text = text.replace(old, new)
     text = text.encode("ascii", errors="ignore").decode("ascii")
-    text = re.sub(r"[\r\n\t]+", " ", text)   # CRITICAL: collapse newlines
+    # Normalize line endings, preserve \n and \n\n, collapse 3+ to \n\n
+    text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\t", " ")
+    text = re.sub(r"\n{3,}", "\n\n", text)
     text = re.sub(r" {2,}", " ", text)
     return text.strip()</code></pre>
   <p>The <code>encode("ascii", errors="ignore")</code> catches any Unicode that slipped through the explicit replacements.</p>
+  <p><strong>Newlines are preserved</strong> so that downstream code (chunking, word timing estimation, and the HTML player) can render paragraph breaks. Single <code>\n</code> produces a line break; <code>\n\n</code> produces a paragraph break (double <code>&lt;br&gt;</code>).</p>
 
   <!-- ------------------------------------------------------------------ -->
   <h2 id="s4">4. Memory Management: Kokoro + Whisper Together</h2>
@@ -401,6 +404,52 @@ sf.write(str(out_path), audio, chunks[0].sample_rate)</code></pre>
   </ul>
   <p><strong>Whisper model</strong> — downloads automatically to <code>~/.cache/huggingface/</code> on first use.</p>
   <p><strong>Piper model</strong> (optional): <code>en_US-lessac-medium.onnx</code> + <code>.json</code> — ~60 MB — from HuggingFace rhasspy/piper-voices.</p>
+
+  <!-- ------------------------------------------------------------------ -->
+  <h2 id="s11">11. Streaming TTS Architecture</h2>
+
+  <h3>Overview</h3>
+  <p><code>streaming_worker.py</code> streams Kokoro audio to the browser in real time via WebSocket, so the user hears audio within 2–4 seconds instead of waiting for full synthesis + Whisper.</p>
+
+  <h3>How it works</h3>
+  <ol>
+    <li><strong>Server starts</strong> — Starlette + Uvicorn on <code>127.0.0.1</code> with an OS-assigned port. Browser opens immediately.</li>
+    <li><strong>Browser connects</strong> via WebSocket. An <code>AudioContext</code> is created for playback.</li>
+    <li><strong>Synthesis loop</strong> — Kokoro synthesizes small chunks (~200 chars, ~2–5s audio each). For each chunk:
+      <ul>
+        <li>Samples are encoded as in-memory PCM-16 WAV (<code>soundfile</code> → <code>BytesIO</code>)</li>
+        <li>Word timings are estimated proportionally from character counts</li>
+        <li>JSON metadata + binary WAV sent over WebSocket</li>
+        <li>Browser decodes WAV via <code>AudioContext.decodeAudioData()</code> and schedules playback with <code>AudioBufferSourceNode.start(when)</code></li>
+        <li>0.25s silence is appended between chunks for natural pacing</li>
+      </ul>
+    </li>
+    <li><strong>Whisper refinement</strong> — after all chunks, Whisper runs on the complete OGG and sends refined timings over WebSocket. The player rebuilds word spans.</li>
+    <li><strong>Archival</strong> — OGG + self-contained HTML saved to <code>~/Music/TTS/</code>.</li>
+  </ol>
+
+  <h3>Key design decisions</h3>
+  <p><strong>Web Audio API, not <code>&lt;audio&gt;</code> element:</strong> The <code>&lt;audio&gt;</code> element can't append buffers dynamically. Web Audio's <code>AudioBufferSourceNode</code> lets us schedule each decoded chunk at a precise time offset, so chunks play seamlessly end-to-end.</p>
+  <p><strong>Estimated word timings:</strong> Character-proportional with punctuation bonuses (+6 weight for <code>.!?</code>, +3 for <code>,;:</code>). Accurate within ~200–400ms — good enough for karaoke during streaming. Whisper replaces them after synthesis completes.</p>
+  <p><strong>Small chunks (200 chars):</strong> Kokoro synthesizes ~200 chars in 1–3 seconds, giving low latency to first audio. The original non-streaming worker uses 800 chars. Too small (&lt; 100 chars) produces choppy prosody.</p>
+  <p><strong>Inter-chunk silence:</strong> 0.25 seconds of zero-samples appended to each chunk (except the last). Without this, concatenated chunks sound rushed at boundaries.</p>
+  <p><strong>Paragraph breaks:</strong> Newlines in the source text are tracked through the chunking → timing estimation → WebSocket → JS rendering pipeline. The word timing <code>"break"</code> field is an integer: <code>1</code> = line break (single <code>&lt;br&gt;</code>), <code>2</code> = paragraph break (double <code>&lt;br&gt;</code>). Whisper refinement carries these flags forward by time-range overlap matching.</p>
+
+  <h3>WebSocket protocol</h3>
+  <table>
+    <tr><th>Direction</th><th>Type</th><th>Format</th></tr>
+    <tr><td>Server → Client</td><td><code>audio_chunk</code></td><td>JSON <code>{type, chunkIndex, totalChunks, words, duration, globalOffset}</code> then binary WAV</td></tr>
+    <tr><td>Server → Client</td><td><code>synthesis_complete</code></td><td>JSON <code>{type, totalDuration}</code></td></tr>
+    <tr><td>Server → Client</td><td><code>refined_timings</code></td><td>JSON <code>{type, words}</code></td></tr>
+    <tr><td>Server → Client</td><td><code>archival_ready</code></td><td>JSON <code>{type, htmlPath, oggPath}</code></td></tr>
+    <tr><td>Client → Server</td><td><code>ready</code></td><td>JSON <code>{type: "ready"}</code></td></tr>
+  </table>
+
+  <h3>Browser autoplay policy</h3>
+  <p>Browsers block <code>AudioContext.resume()</code> without a user gesture for programmatically-opened pages. The streaming player tries auto-resume on the first chunk; if blocked, it shows "tap anywhere to start" and attaches a document-wide click handler that resumes the context and starts playback.</p>
+
+  <h3>Karaoke animation</h3>
+  <p>The streaming player uses <code>requestAnimationFrame</code> (~60Hz) for word highlighting, compared to <code>timeupdate</code> (~4Hz) in the non-streaming player. The same binary search algorithm finds the active word. Playback time is derived from <code>audioCtx.currentTime - startedAt</code>, with a 0.15s startup delay to let the audio pipeline warm up before the first word highlights.</p>
 
 </main>
 </body>
