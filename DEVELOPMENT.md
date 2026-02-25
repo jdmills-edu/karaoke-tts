@@ -32,19 +32,25 @@ terminated.
 
 ### Solution: fully detached subprocess
 
-Launch `worker.py` as a subprocess in a new session:
+Launch `worker.py` as a subprocess detached from the server's process group:
 
 ```python
+popen_kwargs = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+if sys.platform == "win32":
+    popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+else:
+    popen_kwargs["start_new_session"] = True
+
 subprocess.Popen(
     [str(venv_python), str(WORKER_PATH), str(params_file)],
-    start_new_session=True,   # new session → immune to SIGHUP, parent death
-    stdout=subprocess.DEVNULL,
-    stderr=subprocess.DEVNULL,
+    **popen_kwargs,
 )
 ```
 
-`start_new_session=True` creates a new process group and session. The worker
-survives the MCP server exiting or being killed.
+On POSIX (macOS/Linux), `start_new_session=True` creates a new process group and
+session — the worker is immune to SIGHUP and parent death. On Windows,
+`CREATE_NEW_PROCESS_GROUP` prevents the child from receiving `Ctrl+C` signals
+from the parent console, which is the equivalent behavior.
 
 ### Use the venv Python explicitly
 
@@ -52,10 +58,13 @@ Do **not** use `sys.executable` when launching the worker. Under `uv run`,
 `sys.executable` may resolve to something that can't load the project's packages
 in the detached session.
 
-Instead, hard-code the venv path:
+Instead, detect the venv path based on the platform:
 
 ```python
-venv_python = Path(__file__).parent / ".venv" / "bin" / "python"
+if sys.platform == "win32":
+    venv_python = Path(__file__).parent / ".venv" / "Scripts" / "python.exe"
+else:
+    venv_python = Path(__file__).parent / ".venv" / "bin" / "python"
 ```
 
 ### Pass parameters via a temp JSON file
@@ -64,7 +73,9 @@ The worker receives a JSON file path as `sys.argv[1]` — not via stdin or env v
 both of which are unreliable with fully detached processes.
 
 ```python
-params_file = Path(tempfile.mktemp(suffix=".json"))
+fd, params_path = tempfile.mkstemp(suffix=".json")
+os.close(fd)
+params_file = Path(params_path)
 params_file.write_text(json.dumps({...}))
 # worker deletes it after reading: params_file.unlink(missing_ok=True)
 ```
@@ -141,35 +152,35 @@ well within it. Smaller chunks (300–400 chars) are safer but slower.
 Always run `sanitize_text()` on input before passing to any TTS engine. The LLM
 may skip normalization even when instructed. The worker must be defensive.
 
+Most punctuation and special characters (hyphens, em dashes, curly quotes, %, $,
+&, etc.) are left intact — Kokoro handles them correctly. Only a small set of
+unspeakable Unicode characters need replacement:
+
 ```python
 def sanitize_text(text: str) -> str:
     replacements = [
-        ("\u2018", "'"), ("\u2019", "'"),   # curly single quotes
-        ("\u201c", '"'), ("\u201d", '"'),    # curly double quotes
-        ("\u2014", ", "),                    # em dash → comma-space
-        ("\u2013", "-"),                     # en dash → hyphen
-        ("\u2026", "..."),                   # ellipsis
-        ("\u00b7", "."),                     # middle dot
-        ("\u2022", "."),                     # bullet
-        ("\u00a0", " "),                     # non-breaking space
-        ("\u200b", ""),                      # zero-width space
+        ("\u00a0", " "),   # non-breaking space
+        ("\u200b", ""),    # zero-width space
+        ("\u00b7", "."),   # middle dot ·
+        ("\u2022", "."),   # bullet •
     ]
     for old, new in replacements:
         text = text.replace(old, new)
-    text = text.encode("ascii", errors="ignore").decode("ascii")
-    # Normalize line endings, preserve \n and \n\n, collapse 3+ to \n\n
     text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\t", " ")
     text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"(?<=[.!?])\n\n", "\x00PARA\x00", text)  # protect real breaks
+    text = re.sub(r"\n", " ", text)                           # collapse all others
+    text = text.replace("\x00PARA\x00", "\n\n")               # restore real breaks
     text = re.sub(r" {2,}", " ", text)
     return text.strip()
 ```
 
-The `encode("ascii", errors="ignore")` catches any Unicode that slipped through
-the explicit replacements.
-
-**Newlines are preserved** so that downstream code (chunking, word timing
-estimation, and the HTML player) can render paragraph breaks. Single `\n`
-produces a line break; `\n\n` produces a paragraph break (double `<br>`).
+**Newline handling**: Only `\n\n` after sentence-ending punctuation (`.!?`) is
+preserved as a paragraph break. All other newlines — including single `\n` and
+mid-sentence double newlines — are collapsed to spaces, since they are usually
+hard wraps from the source text rather than intentional breaks. The sentinel
+`\x00PARA\x00` pattern temporarily protects real paragraph breaks during the
+collapse pass.
 
 ---
 
@@ -179,8 +190,9 @@ produces a line break; `\n\n` produces a paragraph break (double `<br>`).
 
 Kokoro loads a **310 MB** ONNX model. Faster-whisper (small) loads a **460 MB**
 model. Running them back-to-back in the same Python process hits ~800 MB+ of
-model memory, which can trigger macOS's memory pressure killer (jetsam) or
-cause a native crash when the Whisper model tries to allocate.
+model memory, which can trigger the OS memory pressure killer (jetsam on macOS,
+OOM killer on Linux) or cause a native crash when the Whisper model tries to
+allocate.
 
 ### Fix: force garbage collection between stages
 
@@ -297,7 +309,8 @@ the synthesis even begins — check imports, venv path, and params file.
 
 ## 8. Known Good Configuration
 
-Tested and working as of February 2026:
+Tested on macOS (Apple Silicon) as of February 2026. Linux and Windows are
+supported but less extensively tested.
 
 | Component | Version | Notes |
 |-----------|---------|-------|
@@ -339,7 +352,8 @@ full synthesis + Whisper.
    - 0.25s silence is appended between chunks for natural pacing
    - Whisper immediately refines that chunk's word timings and sends a
      `chunk_refined` message — the player rebuilds word spans in place
-4. **Archival** — OGG + self-contained HTML saved to `~/Music/TTS/`.
+4. **Archival** — OGG + self-contained HTML saved to the configured `output_dir`
+   (default `~/Music/TTS/`).
 
 ### Key design decisions
 

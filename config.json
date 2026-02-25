@@ -3,8 +3,8 @@
   "whisper_model": "small",
   "kokoro": {
     "default_voice": "af_heart",
-    "model_path": "~/Documents/GitHub/karaoke-tts/models/kokoro-v1.0.onnx",
-    "voices_path": "~/Documents/GitHub/karaoke-tts/models/voices-v1.0.bin",
+    "model_path": "models/kokoro-v1.0.onnx",
+    "voices_path": "models/voices-v1.0.bin",
     "lang": "en-us",
     "speed": 1.0
   }
