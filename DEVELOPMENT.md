@@ -17,6 +17,7 @@ pipeline, the MCP server architecture, or the background worker.
 8. [Debugging Native Crashes](#8-debugging-native-crashes)
 9. [terminal-notifier on macOS 15](#9-terminal-notifier-on-macos-15)
 10. [Known Good Configuration](#10-known-good-configuration)
+11. [Streaming TTS Architecture](#11-streaming-tts-architecture)
 
 ---
 
@@ -83,17 +84,15 @@ params_file.write_text(json.dumps({...}))
 Crashes in espeak-ng produce **SIGSEGV** — a native signal that Python's
 `try/except Exception` **cannot catch**. The process dies silently.
 
-### Crash #1: Double newlines create empty espeak-ng inputs
+### ~~Crash #1: Double newlines~~ (Disproven)
 
-`phonemizer.phonemize()` splits its input on `\n`. A double newline (`\n\n`)
-produces an empty string in the middle of the list. Passing `""` to espeak-ng
-causes a segfault.
+Early development attributed espeak-ng segfaults to newlines in the input text.
+This was a misdiagnosis — the crashes were actually caused by concurrent bugs
+(heap corruption from `np.concatenate`, Unicode characters). Kokoro/espeak-ng
+handles both single and double newlines without issues.
 
-**Fix**: collapse all newlines to spaces before synthesizing.
-
-```python
-text = re.sub(r"[\r\n\t]+", " ", text)
-```
+**Newlines are safe.** `sanitize_text()` preserves `\n` and `\n\n` (paragraph
+breaks). Only runs of 3+ consecutive newlines are collapsed to `\n\n`.
 
 ### Crash #2: np.concatenate triggers heap corruption
 
@@ -160,13 +159,19 @@ def sanitize_text(text: str) -> str:
     for old, new in replacements:
         text = text.replace(old, new)
     text = text.encode("ascii", errors="ignore").decode("ascii")
-    text = re.sub(r"[\r\n\t]+", " ", text)   # CRITICAL: collapse newlines
+    # Normalize line endings, preserve \n and \n\n, collapse 3+ to \n\n
+    text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\t", " ")
+    text = re.sub(r"\n{3,}", "\n\n", text)
     text = re.sub(r" {2,}", " ", text)
     return text.strip()
 ```
 
 The `encode("ascii", errors="ignore")` catches any Unicode that slipped through
 the explicit replacements.
+
+**Newlines are preserved** so that downstream code (chunking, word timing
+estimation, and the HTML player) can render paragraph breaks. Single `\n`
+produces a line break; `\n\n` produces a paragraph break (double `<br>`).
 
 ---
 
@@ -354,3 +359,78 @@ Tested and working as of February 2026:
 
 **Piper model** (optional):
 - `en_US-lessac-medium.onnx` + `.json` — ~60 MB — from HuggingFace rhasspy/piper-voices
+
+---
+
+## 11. Streaming TTS Architecture
+
+### Overview
+
+`streaming_worker.py` streams Kokoro audio to the browser in real time via
+WebSocket, so the user hears audio within 2-4 seconds instead of waiting for
+full synthesis + Whisper.
+
+### How it works
+
+1. **Server starts** — Starlette + Uvicorn on `127.0.0.1` with an OS-assigned
+   port. Browser opens immediately.
+2. **Browser connects** via WebSocket. An `AudioContext` is created for playback.
+3. **Synthesis loop** — Kokoro synthesizes small chunks (~200 chars, ~2-5s audio
+   each). For each chunk:
+   - Samples are encoded as in-memory PCM-16 WAV (`soundfile` → `BytesIO`)
+   - Word timings are estimated proportionally from character counts
+   - JSON metadata + binary WAV sent over WebSocket
+   - Browser decodes WAV via `AudioContext.decodeAudioData()` and schedules
+     playback with `AudioBufferSourceNode.start(when)`
+   - 0.25s silence is appended between chunks for natural pacing
+4. **Whisper refinement** — after all chunks, Whisper runs on the complete OGG
+   and sends refined timings over WebSocket. The player rebuilds word spans.
+5. **Archival** — OGG + self-contained HTML saved to `~/Music/TTS/`.
+
+### Key design decisions
+
+**Web Audio API, not `<audio>` element**: The `<audio>` element can't append
+buffers dynamically. Web Audio's `AudioBufferSourceNode` lets us schedule each
+decoded chunk at a precise time offset, so chunks play seamlessly end-to-end.
+
+**Estimated word timings**: Character-proportional with punctuation bonuses
+(+6 weight for `.!?`, +3 for `,;:`). Accurate within ~200-400ms — good enough
+for karaoke during streaming. Whisper replaces them after synthesis completes.
+
+**Small chunks (200 chars)**: Kokoro synthesizes ~200 chars in 1-3 seconds,
+giving low latency to first audio. The original non-streaming worker uses 800
+chars. Too small (< 100 chars) produces choppy prosody.
+
+**Inter-chunk silence**: 0.25 seconds of zero-samples appended to each chunk
+(except the last). Without this, concatenated chunks sound rushed at boundaries.
+
+**Paragraph breaks**: Newlines in the source text are tracked through the
+chunking → timing estimation → WebSocket → JS rendering pipeline. The word
+timing `"break"` field is an integer: `1` = line break (single `<br>`),
+`2` = paragraph break (double `<br>`). Whisper refinement carries these flags
+forward by time-range overlap matching.
+
+### WebSocket protocol
+
+| Direction | Type | Format |
+|-----------|------|--------|
+| Server → Client | `audio_chunk` | JSON `{type, chunkIndex, totalChunks, words, duration, globalOffset}` then binary WAV |
+| Server → Client | `synthesis_complete` | JSON `{type, totalDuration}` |
+| Server → Client | `refined_timings` | JSON `{type, words}` |
+| Server → Client | `archival_ready` | JSON `{type, htmlPath, oggPath}` |
+| Client → Server | `ready` | JSON `{type: "ready"}` |
+
+### Browser autoplay policy
+
+Browsers block `AudioContext.resume()` without a user gesture for
+programmatically-opened pages. The streaming player tries auto-resume on the
+first chunk; if blocked, it shows "tap anywhere to start" and attaches a
+document-wide click handler that resumes the context and starts playback.
+
+### Karaoke animation
+
+The streaming player uses `requestAnimationFrame` (~60Hz) for word highlighting,
+compared to `timeupdate` (~4Hz) in the non-streaming player. The same binary
+search algorithm finds the active word. Playback time is derived from
+`audioCtx.currentTime - startedAt`, with a 0.15s startup delay to let the audio
+pipeline warm up before the first word highlights.
