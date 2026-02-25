@@ -202,6 +202,15 @@ def get_word_timestamps(audio_path, model_size):
 The stream-write approach in `generate_kokoro` (§2) also helps: since audio is
 never accumulated in a large numpy array, peak memory during synthesis is lower.
 
+### Streaming mode: both models loaded simultaneously
+
+The streaming worker (`streaming_worker.py`) takes a different approach: it loads
+both Kokoro and Whisper at startup (~770MB combined) and runs Whisper on each
+chunk immediately after synthesis. This avoids waiting for full synthesis to
+complete before refining timings. After all chunks are done, both models are
+explicitly deleted and `gc.collect()` is called. This has worked reliably in
+testing despite the higher peak memory.
+
 ---
 
 ## 5. Faster-Whisper Notes
@@ -375,17 +384,18 @@ full synthesis + Whisper.
 1. **Server starts** — Starlette + Uvicorn on `127.0.0.1` with an OS-assigned
    port. Browser opens immediately.
 2. **Browser connects** via WebSocket. An `AudioContext` is created for playback.
-3. **Synthesis loop** — Kokoro synthesizes small chunks (~200 chars, ~2-5s audio
-   each). For each chunk:
+3. **Synthesis loop** — Both Kokoro (~310MB) and Whisper (~460MB) are loaded
+   simultaneously (~770MB combined). Kokoro synthesizes small chunks (~200 chars,
+   ~2-5s audio each). For each chunk:
    - Samples are encoded as in-memory PCM-16 WAV (`soundfile` → `BytesIO`)
    - Word timings are estimated proportionally from character counts
    - JSON metadata + binary WAV sent over WebSocket
    - Browser decodes WAV via `AudioContext.decodeAudioData()` and schedules
      playback with `AudioBufferSourceNode.start(when)`
    - 0.25s silence is appended between chunks for natural pacing
-4. **Whisper refinement** — after all chunks, Whisper runs on the complete OGG
-   and sends refined timings over WebSocket. The player rebuilds word spans.
-5. **Archival** — OGG + self-contained HTML saved to `~/Music/TTS/`.
+   - Whisper immediately refines that chunk's word timings and sends a
+     `chunk_refined` message — the player rebuilds word spans in place
+4. **Archival** — OGG + self-contained HTML saved to `~/Music/TTS/`.
 
 ### Key design decisions
 
@@ -395,7 +405,8 @@ decoded chunk at a precise time offset, so chunks play seamlessly end-to-end.
 
 **Estimated word timings**: Character-proportional with punctuation bonuses
 (+6 weight for `.!?`, +3 for `,;:`). Accurate within ~200-400ms — good enough
-for karaoke during streaming. Whisper replaces them after synthesis completes.
+for karaoke during streaming. Whisper refines each chunk immediately after it
+is synthesized.
 
 **Small chunks (200 chars)**: Kokoro synthesizes ~200 chars in 1-3 seconds,
 giving low latency to first audio. The original non-streaming worker uses 800
@@ -407,25 +418,25 @@ chars. Too small (< 100 chars) produces choppy prosody.
 **Paragraph breaks**: Newlines in the source text are tracked through the
 chunking → timing estimation → WebSocket → JS rendering pipeline. The word
 timing `"break"` field is an integer: `1` = line break (single `<br>`),
-`2` = paragraph break (double `<br>`). Whisper refinement carries these flags
-forward by time-range overlap matching.
+`2` = paragraph break (double `<br>`). When Whisper refines a chunk, break
+flags are transferred from estimated to refined words via proportional index
+mapping (not time-based overlap, which is fragile when timings diverge).
 
 ### WebSocket protocol
 
 | Direction | Type | Format |
 |-----------|------|--------|
 | Server → Client | `audio_chunk` | JSON `{type, chunkIndex, totalChunks, words, duration, globalOffset}` then binary WAV |
+| Server → Client | `chunk_refined` | JSON `{type, chunkIndex, wordStartIdx, oldWordCount, words}` |
 | Server → Client | `synthesis_complete` | JSON `{type, totalDuration}` |
-| Server → Client | `refined_timings` | JSON `{type, words}` |
 | Server → Client | `archival_ready` | JSON `{type, htmlPath, oggPath}` |
 | Client → Server | `ready` | JSON `{type: "ready"}` |
 
-### Browser autoplay policy
+### Playback
 
-Browsers block `AudioContext.resume()` without a user gesture for
-programmatically-opened pages. The streaming player tries auto-resume on the
-first chunk; if blocked, it shows "tap anywhere to start" and attaches a
-document-wide click handler that resumes the context and starts playback.
+The streaming player does not autoplay. A buffering spinner is shown until the
+first audio chunk is decoded, then replaced by a play/pause button. The user
+clicks play to start; `AudioContext` is created and resumed on the first click.
 
 ### Karaoke animation
 

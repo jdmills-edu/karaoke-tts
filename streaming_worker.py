@@ -6,9 +6,10 @@ Runs a local HTTP + WebSocket server that streams Kokoro TTS audio chunks
 to a browser-based karaoke player in real time.  Audio starts playing in
 the browser within seconds while synthesis continues in the background.
 
-After all chunks are synthesized, Whisper runs on the complete audio to
-provide refined word-level timestamps, and an archival OGG + HTML pair
-is saved matching the existing non-streaming output format.
+After each chunk is synthesized, Whisper immediately refines that chunk's
+word timings and sends the refinement to the browser — no waiting for full
+synthesis to complete.  Both Kokoro and Whisper are loaded simultaneously
+(~770MB combined).  An archival OGG + HTML pair is saved at the end.
 
 Usage: python streaming_worker.py <params_json_file>
 """
@@ -29,7 +30,6 @@ import soundfile as sf
 from worker import (
     PLAYER_TEMPLATE,
     generate_player,
-    get_word_timestamps,
     notify,
     resolve,
     sanitize_text,
@@ -87,7 +87,7 @@ STREAMING_PLAYER_HTML = """<!DOCTYPE html>
       color: #c8c8e0;
       font-family: -apple-system, "Helvetica Neue", sans-serif;
       font-size: 26px;
-      line-height: 1.9;
+      line-height: 1.6;
       height: 100vh;
       overflow: hidden;
       display: flex;
@@ -115,6 +115,7 @@ STREAMING_PLAYER_HTML = """<!DOCTYPE html>
     }
     #dur { font-size: 13px; color: #44447a; font-variant-numeric: tabular-nums; }
     #scroll { flex: 1; overflow-y: auto; padding: 60px; }
+    #text br { display: block; content: ""; margin-top: 0.3em; }
     #text { max-width: 860px; margin: 0 auto; }
     .w { color: #2a2a52; transition: color 0.07s ease, text-shadow 0.07s ease; }
     .w.active {
@@ -133,10 +134,20 @@ STREAMING_PLAYER_HTML = """<!DOCTYPE html>
     #playbtn {
       background: none; border: none; cursor: pointer;
       color: #f5c518; padding: 0; flex-shrink: 0;
-      display: flex; align-items: center;
+      display: none; align-items: center;
     }
+    #playbtn.ready { display: flex; }
     #playbtn:hover { color: #fff; }
     #playbtn svg { width: 28px; height: 28px; }
+    #spinner {
+      flex-shrink: 0;
+      width: 28px; height: 28px;
+      display: flex; align-items: center;
+    }
+    #spinner.hidden { display: none; }
+    #spinner svg { width: 28px; height: 28px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #spinner svg { animation: spin 1s linear infinite; }
     #track {
       flex: 1; height: 3px; background: #1a1a2e;
       border-radius: 2px; cursor: pointer;
@@ -158,6 +169,11 @@ STREAMING_PLAYER_HTML = """<!DOCTYPE html>
   </div>
   <div id="scroll"><div id="text"></div></div>
   <div id="footer">
+    <div id="spinner">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#44447a" stroke-width="2.5" stroke-linecap="round">
+        <path d="M12 2 A10 10 0 1 1 2 12" />
+      </svg>
+    </div>
     <button id="playbtn" title="Play / Pause">
       <svg viewBox="0 0 24 24" fill="currentColor">
         <path id="play-shape" d="M5,3 L19,12 L5,21 Z"/>
@@ -172,6 +188,7 @@ STREAMING_PLAYER_HTML = """<!DOCTYPE html>
     const allBuffers = [];   // {buffer, offset, duration}
     let allWords = [];
     let spans = [];
+    const chunkRanges = [];  // [{start, count}] — word index ranges per chunk
     let totalDuration = 0;
     let synthDone = false;
     let isPlaying = false;
@@ -180,8 +197,6 @@ STREAMING_PLAYER_HTML = """<!DOCTYPE html>
     let lastIdx = -1;
     let activeSources = [];  // scheduled AudioBufferSourceNodes
     let pendingMeta = null;
-    let needsGesture = false; // true if autoplay was blocked
-    let hasChunks = false;    // true once at least one chunk is decoded
 
     const STARTUP_DELAY = 0.15; // seconds — lets audio pipeline warm up
 
@@ -217,19 +232,6 @@ STREAMING_PLAYER_HTML = """<!DOCTYPE html>
       return audioCtx.state === "running";
     }
 
-    // Document-wide click handler: if autoplay was blocked, ANY click
-    // anywhere on the page (play button, text, progress bar, etc.)
-    // will resume the AudioContext and start playback.
-    document.addEventListener("click", async () => {
-      if (needsGesture && hasChunks && !isPlaying) {
-        const running = await tryResumeCtx();
-        if (running) {
-          needsGesture = false;
-          startPlayback();
-        }
-      }
-    }, { once: false });
-
     playbtn.addEventListener("click", async () => {
       await tryResumeCtx();
       if (isPlaying) {
@@ -264,9 +266,9 @@ STREAMING_PLAYER_HTML = """<!DOCTYPE html>
 
     function startPlayback() {
       if (!audioCtx || audioCtx.state !== "running") return;
+      if (allBuffers.length === 0) return; // nothing to play yet
       startedAt = audioCtx.currentTime - pausedAt + STARTUP_DELAY;
       isPlaying = true;
-      needsGesture = false;
       scheduleAll(pausedAt);
       updateBtn();
       requestAnimationFrame(animLoop);
@@ -340,6 +342,7 @@ STREAMING_PLAYER_HTML = """<!DOCTYPE html>
     }
 
     function addWords(words) {
+      const startIdx = allWords.length;
       words.forEach(w => {
         allWords.push(w);
         if (w.break) insertBreaks(w.break);
@@ -350,14 +353,14 @@ STREAMING_PLAYER_HTML = """<!DOCTYPE html>
         txt.appendChild(s);
         spans.push(s);
       });
+      chunkRanges.push({start: startIdx, count: words.length});
     }
 
-    function replaceAllWords(words) {
+    function rebuildDOM() {
       const t = isPlaying ? audioCtx.currentTime - startedAt : pausedAt;
-      allWords = words;
       txt.innerHTML = "";
       spans = [];
-      words.forEach((w, i) => {
+      allWords.forEach((w, i) => {
         if (w.break) insertBreaks(w.break);
         const s = document.createElement("span");
         s.className = w.end <= t ? "w past" : "w";
@@ -367,6 +370,25 @@ STREAMING_PLAYER_HTML = """<!DOCTYPE html>
         spans.push(s);
       });
       lastIdx = -1;
+    }
+
+    function handleChunkRefined(msg) {
+      const range = chunkRanges[msg.chunkIndex];
+      if (!range) return;
+      const oldCount = range.count;
+      const newCount = msg.words.length;
+
+      // Splice refined words into allWords
+      allWords.splice(range.start, oldCount, ...msg.words);
+
+      // Update chunk ranges
+      const diff = newCount - oldCount;
+      range.count = newCount;
+      for (let i = msg.chunkIndex + 1; i < chunkRanges.length; i++) {
+        chunkRanges[i].start += diff;
+      }
+
+      rebuildDOM();
     }
 
     // --- WebSocket ---
@@ -390,12 +412,12 @@ STREAMING_PLAYER_HTML = """<!DOCTYPE html>
             pendingMeta = msg;
             statusEl.textContent = "chunk " + (msg.chunkIndex + 1) + "/" + msg.totalChunks;
             totalDuration = msg.globalOffset + msg.duration;
+          } else if (msg.type === "chunk_refined") {
+            handleChunkRefined(msg);
+            statusEl.textContent = "chunk " + (msg.chunkIndex + 1) + " refined";
           } else if (msg.type === "synthesis_complete") {
             totalDuration = msg.totalDuration;
             synthDone = true;
-            statusEl.textContent = "refining timings...";
-          } else if (msg.type === "refined_timings") {
-            replaceAllWords(msg.words);
             statusEl.textContent = "done";
             setTimeout(() => { statusEl.style.opacity = "0"; }, 2000);
           }
@@ -422,30 +444,21 @@ STREAMING_PLAYER_HTML = """<!DOCTYPE html>
       };
     }
 
-    async function onChunkDecoded(buffer, meta) {
+    function onChunkDecoded(buffer, meta) {
       allBuffers.push({
         buffer: buffer,
         offset: meta.globalOffset,
         duration: meta.duration,
       });
-      hasChunks = true;
+
+      // Show play button once first chunk is ready
+      if (allBuffers.length === 1) {
+        document.getElementById("spinner").classList.add("hidden");
+        playbtn.classList.add("ready");
+      }
 
       // Add word spans
       addWords(meta.words);
-
-      // Auto-start playback on first chunk
-      if (meta.chunkIndex === 0 && !isPlaying) {
-        const running = await tryResumeCtx();
-        if (running) {
-          startPlayback();
-        } else {
-          // Autoplay blocked by browser policy — any click on the
-          // page will resume (via the document-level handler above)
-          needsGesture = true;
-          statusEl.textContent = "tap anywhere to start";
-        }
-        return;
-      }
 
       // If already playing, schedule this new chunk immediately
       if (isPlaying && audioCtx) {
@@ -560,7 +573,6 @@ async def run_streaming_server(params: dict) -> None:
     config = params["config"]
     ogg_path = Path(params["ogg_path"])
     html_path = Path(params["html_path"])
-    whisper_model = config.get("whisper_model", "small")
 
     log_path = ogg_path.with_suffix(".worker.log")
 
@@ -646,8 +658,8 @@ async def run_streaming_server(params: dict) -> None:
             server.should_exit = True
             return
 
-        # --- Stage 1: Streaming synthesis ---
-        log("stage 1: streaming synthesis")
+        # --- Stage 1: Streaming synthesis with incremental Whisper ---
+        log("stage 1: streaming synthesis + per-chunk whisper refinement")
         try:
             all_words = await asyncio.get_event_loop().run_in_executor(
                 None, _blocking_synthesis, params, client_ws, loop, log,
@@ -661,44 +673,13 @@ async def run_streaming_server(params: dict) -> None:
             return
 
         synthesis_complete.set()
-        log("stage 1 done: synthesis complete")
+        log("stage 1 done: synthesis + refinement complete")
 
-        # --- Stage 2: Whisper refinement ---
-        log("stage 2: whisper refinement")
-        notify("Syncing words\u2026", ogg_path.name)
-        try:
-            refined_words = await asyncio.get_event_loop().run_in_executor(
-                None, get_word_timestamps, ogg_path, whisper_model, log,
-            )
-            log(f"stage 2 done: {len(refined_words)} refined words")
-
-            # Carry line-break counts from estimated words to refined words.
-            # Match by finding the estimated word whose time range overlaps
-            # each refined word's start time.
-            for rw in refined_words:
-                for ew in all_words:
-                    if not ew.get("break"):
-                        continue
-                    # If the estimated break-word overlaps this refined word
-                    if ew["start"] <= rw["start"] < ew["end"]:
-                        rw["break"] = ew["break"]  # integer: 1=line, 2=paragraph
-                        break
-
-            ws = client_ws[0]
-            if ws:
-                await ws.send_json({
-                    "type": "refined_timings",
-                    "words": refined_words,
-                })
-                log("sent refined timings to client")
-        except Exception as e:
-            import traceback
-            log(f"whisper error: {e}\n{traceback.format_exc()}")
-            refined_words = all_words  # fall back to estimated timings
-
-        # --- Stage 3: Save archival files ---
-        log("stage 3: archival output")
-        generate_player(refined_words, engine, voice, ogg_path, html_path)
+        # --- Stage 2: Save archival files ---
+        # No separate full-file Whisper pass needed — per-chunk refinement
+        # already produced accurate word timings during synthesis.
+        log("stage 2: archival output")
+        generate_player(all_words, engine, voice, ogg_path, html_path)
         log(f"archival HTML saved: {html_path}")
 
         ws = client_ws[0]
@@ -734,32 +715,41 @@ def _blocking_synthesis(
     loop: asyncio.AbstractEventLoop,
     log,
 ) -> list[dict]:
-    """Run Kokoro synthesis (blocking) and stream chunks over WebSocket.
+    """Run Kokoro synthesis with incremental Whisper refinement.
 
-    Returns the list of all estimated word timings.
+    For each chunk: synthesize with Kokoro, send estimated timings + audio
+    to the browser, then immediately run Whisper on that chunk's audio and
+    send refined timings.  Both models are loaded simultaneously (~770MB).
+
+    Returns the list of all word timings (refined where Whisper succeeded,
+    estimated where it failed).
     """
+    import tempfile
+
     from kokoro_onnx import Kokoro
+    from faster_whisper import WhisperModel
 
     config = params["config"]
     voice = params["voice"]
     ogg_path = Path(params["ogg_path"])
+    whisper_model_size = config.get("whisper_model", "small")
 
     k = config["kokoro"]
     kokoro = Kokoro(str(resolve(k["model_path"])), str(resolve(k["voices_path"])))
     lang, speed = k.get("lang", "en-us"), k.get("speed", 1.0)
 
+    log(f"loading whisper model ({whisper_model_size}) for incremental refinement...")
+    whisper_model = WhisperModel(whisper_model_size, device="cpu", compute_type="int8")
+    log("both models loaded")
+
     text = sanitize_text(params["text"])
-    # Small chunks for streaming — each produces ~2-5s of audio,
-    # keeping latency low before the first audio plays.
-    # Uses the streaming-specific chunker that preserves newlines
-    # so paragraph breaks can be rendered in the frontend.
     chunks = chunk_text_streaming(text, max_chars=200)
     log(f"kokoro: {len(chunks)} chunks, sizes={[len(c) for c in chunks]}")
 
     global_offset = 0.0
     all_words = []
+    chunk_word_ranges = []  # [(start_idx, count)] for each chunk
     out_file = None
-    # Brief silence between chunks so concatenated speech sounds natural
     INTER_CHUNK_PAUSE = 0.25  # seconds
 
     try:
@@ -767,6 +757,7 @@ def _blocking_synthesis(
             log(f"kokoro: chunk {i+1}/{len(chunks)} preview={repr(chunk[:80])}")
             samples, sr = kokoro.create(chunk, voice=voice, speed=speed, lang=lang)
             chunk_duration = len(samples) / sr
+            raw_samples = samples  # keep original without silence for Whisper
             log(f"kokoro: chunk {i+1} done, {len(samples)} samples, {chunk_duration:.2f}s")
 
             # Append a short silence after every chunk (except the last)
@@ -786,15 +777,17 @@ def _blocking_synthesis(
             wav_bytes = samples_to_wav_bytes(samples, sr)
 
             # Estimate word timings
-            words = estimate_word_timings(chunk, chunk_duration, global_offset)
-            all_words.extend(words)
+            estimated_words = estimate_word_timings(chunk, chunk_duration, global_offset)
+            chunk_word_start = len(all_words)
+            all_words.extend(estimated_words)
+            chunk_word_ranges.append((chunk_word_start, len(estimated_words)))
 
-            # Send to client
+            # Send estimated timings + audio to client
             meta = {
                 "type": "audio_chunk",
                 "chunkIndex": i,
                 "totalChunks": len(chunks),
-                "words": words,
+                "words": estimated_words,
                 "duration": chunk_duration,
                 "globalOffset": global_offset,
             }
@@ -808,6 +801,77 @@ def _blocking_synthesis(
                     future.result(timeout=10)
                 except Exception as e:
                     log(f"failed to send chunk {i}: {e}")
+
+            # --- Incremental Whisper refinement ---
+            try:
+                tmp_path = Path(tempfile.mktemp(suffix=".wav"))
+                sf.write(str(tmp_path), raw_samples, sr)
+
+                segments, _ = whisper_model.transcribe(
+                    str(tmp_path), word_timestamps=True,
+                )
+                refined_words = []
+                for seg in segments:
+                    if seg.words:
+                        for w in seg.words:
+                            refined_words.append({
+                                "word": w.word,
+                                "start": round(w.start + global_offset, 3),
+                                "end": round(w.end + global_offset, 3),
+                            })
+
+                tmp_path.unlink(missing_ok=True)
+
+                if refined_words:
+                    # Transfer break flags by proportional index.
+                    # Time-based overlap is fragile because Whisper
+                    # and estimated timings can differ significantly.
+                    # Instead, map each break's position in the
+                    # estimated list to the corresponding position
+                    # in the refined list.
+                    n_est = len(estimated_words)
+                    n_ref = len(refined_words)
+                    for j, ew in enumerate(estimated_words):
+                        if ew.get("break"):
+                            ri = round(j * n_ref / n_est) if n_est else 0
+                            ri = max(0, min(ri, n_ref - 1))
+                            refined_words[ri]["break"] = ew["break"]
+
+                    # Update all_words with refined timings
+                    start, count = chunk_word_ranges[i]
+                    all_words[start:start + count] = refined_words
+                    chunk_word_ranges[i] = (start, len(refined_words))
+                    # Shift subsequent chunk ranges if word count changed
+                    diff = len(refined_words) - count
+                    for j in range(i + 1, len(chunk_word_ranges)):
+                        s, c = chunk_word_ranges[j]
+                        chunk_word_ranges[j] = (s + diff, c)
+
+                    # Send refined timings for this chunk
+                    ws = client_ws[0]
+                    if ws:
+                        future = asyncio.run_coroutine_threadsafe(
+                            ws.send_json({
+                                "type": "chunk_refined",
+                                "chunkIndex": i,
+                                "wordStartIdx": start,
+                                "oldWordCount": count,
+                                "words": refined_words,
+                            }),
+                            loop,
+                        )
+                        try:
+                            future.result(timeout=10)
+                        except Exception as e:
+                            log(f"failed to send chunk_refined {i}: {e}")
+
+                    log(f"whisper: chunk {i+1} refined, {count} est → {len(refined_words)} refined words")
+                else:
+                    log(f"whisper: chunk {i+1} produced no words, keeping estimates")
+
+            except Exception as e:
+                log(f"whisper: chunk {i+1} refinement failed: {e}")
+                # Keep estimated timings for this chunk
 
             global_offset += chunk_duration
     finally:
@@ -830,6 +894,8 @@ def _blocking_synthesis(
             log(f"failed to send synthesis_complete: {e}")
 
     import gc
+    del kokoro
+    del whisper_model
     gc.collect()
 
     return all_words

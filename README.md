@@ -11,7 +11,8 @@ Forked from [local-hq-tts](https://github.com/jdmills-edu/local-hq-tts).
 1. Claude calls `generate_speech` — a local HTTP + WebSocket server starts and the browser opens immediately
 2. Kokoro synthesizes audio in small chunks (~200 chars each, ~2-5s of audio)
 3. Each chunk streams to the browser over WebSocket and plays immediately with estimated word timings
-4. After all chunks finish, Whisper refines the word timings and an archival OGG + HTML pair is saved
+4. After each chunk, Whisper immediately refines that chunk's word timings and sends them to the browser
+5. When synthesis completes, an archival OGG + HTML pair is saved
 
 Streaming mode typically plays the first audio within 2-4 seconds of starting synthesis, compared to 30-90+ seconds for full synthesis in standard mode.
 
