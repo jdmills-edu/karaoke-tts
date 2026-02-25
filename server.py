@@ -9,6 +9,7 @@ never interrupts generation.
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -37,11 +38,24 @@ def resolve(p: str) -> Path:
     return path.resolve()
 
 
-def make_output_paths(config: dict) -> tuple[Path, Path]:
+def slugify(text: str) -> str:
+    """Convert text to a filesystem-friendly slug."""
+    text = text.lower().strip()
+    text = re.sub(r"[^\w\s-]", "", text)
+    text = re.sub(r"[\s_-]+", "-", text)
+    return text[:80].strip("-")
+
+
+def make_output_paths(config: dict, title: str = "") -> tuple[Path, Path]:
     output_dir = resolve(config["output_dir"])
-    output_dir.mkdir(parents=True, exist_ok=True)
-    stem = f"tts_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    return output_dir / f"{stem}.ogg", output_dir / f"{stem}.html"
+    slug = slugify(title) if title else ""
+    if slug:
+        folder_name = f"{slug}"
+    else:
+        folder_name = f"tts_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    sub_dir = output_dir / folder_name
+    sub_dir.mkdir(parents=True, exist_ok=True)
+    return sub_dir / "audio.ogg", sub_dir / "player.html"
 
 
 @mcp.tool()
@@ -114,7 +128,7 @@ def generate_speech(
         ogg_path = resolve(output_path)
         html_path = ogg_path.with_suffix(".html")
     else:
-        ogg_path, html_path = make_output_paths(config)
+        ogg_path, html_path = make_output_paths(config, title=title or "")
 
     fd, params_path = tempfile.mkstemp(suffix=".json")
     os.close(fd)
