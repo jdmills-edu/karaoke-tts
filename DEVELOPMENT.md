@@ -12,12 +12,10 @@ pipeline, the MCP server architecture, or the background worker.
 3. [Text Sanitization for TTS](#3-text-sanitization-for-tts)
 4. [Memory Management: Kokoro + Whisper Together](#4-memory-management-kokoro--whisper-together)
 5. [Faster-Whisper Notes](#5-faster-whisper-notes)
-6. [Piper TTS API Changes](#6-piper-tts-api-changes)
-7. [Audio Format: OGG via SoundFile](#7-audio-format-ogg-via-soundfile)
-8. [Debugging Native Crashes](#8-debugging-native-crashes)
-9. [terminal-notifier on macOS 15](#9-terminal-notifier-on-macos-15)
-10. [Known Good Configuration](#10-known-good-configuration)
-11. [Streaming TTS Architecture](#11-streaming-tts-architecture)
+6. [Audio Format: OGG via SoundFile](#6-audio-format-ogg-via-soundfile)
+7. [Debugging Native Crashes](#7-debugging-native-crashes)
+8. [Known Good Configuration](#8-known-good-configuration)
+9. [Streaming TTS Architecture](#9-streaming-tts-architecture)
 
 ---
 
@@ -234,35 +232,7 @@ for segment in segments:           # fully consume the iterator
 
 ---
 
-## 6. Piper TTS API Changes
-
-**Piper v1.4+ broke the old wave-file API.** `synthesize()` no longer accepts a
-`wave.Wave_write` object. It now returns `Iterable[AudioChunk]`.
-
-### Old (broken, ≤ v1.3):
-```python
-with wave.open(path, "w") as wf:
-    voice.synthesize(text, wf)      # no longer works
-```
-
-### New (correct, v1.4+):
-```python
-chunks = list(voice.synthesize(text))
-if not chunks:
-    raise RuntimeError("Piper produced no audio")
-audio = np.concatenate([c.audio_float_array for c in chunks])
-sf.write(str(out_path), audio, chunks[0].sample_rate)
-```
-
-Key fields on `AudioChunk`:
-- `audio_float_array` — float32 numpy array, range [-1.0, 1.0]
-- `sample_rate` — typically 22050 Hz
-- `sample_width` — bytes per sample (2 = 16-bit)
-- `sample_channels` — number of channels
-
----
-
-## 7. Audio Format: OGG via SoundFile
+## 6. Audio Format: OGG via SoundFile
 
 OGG Vorbis is ~8× smaller than WAV for the same audio. `soundfile` writes OGG
 natively — just use a `.ogg` extension in the output path.
@@ -286,7 +256,7 @@ a native crash mid-synthesis.
 
 ---
 
-## 8. Debugging Native Crashes
+## 7. Debugging Native Crashes
 
 Native library crashes (SIGSEGV) are invisible to Python's exception handling.
 Symptoms:
@@ -325,28 +295,7 @@ the synthesis even begins — check imports, venv path, and params file.
 
 ---
 
-## 9. terminal-notifier on macOS 15
-
-Several `terminal-notifier` flags are silently broken on macOS 15 (Sequoia):
-
-| Flag | Status |
-|------|--------|
-| `-sender com.apple.Terminal` | Silently **suppresses** all notifications |
-| `-open <url>` | Does nothing |
-| `-execute <command>` | Does nothing |
-
-**Use only** `-title` and `-message`. No `-sender`, no `-open`, no `-execute`.
-
-```python
-subprocess.run(
-    ["terminal-notifier", "-title", title, "-message", message],
-    check=False,
-)
-```
-
----
-
-## 10. Known Good Configuration
+## 8. Known Good Configuration
 
 Tested and working as of February 2026:
 
@@ -356,9 +305,7 @@ Tested and working as of February 2026:
 | kokoro-onnx | 0.5.0 | Not on PyPI; stream-write required |
 | faster-whisper | ≥ 1.0.0 | `small` model, `int8` compute |
 | soundfile | ≥ 0.12.0 | OGG Vorbis output |
-| piper-tts | ≥ 1.4.1 | New `AudioChunk` API |
 | mcp[cli] | ≥ 1.0.0 | FastMCP |
-| terminal-notifier | any | macOS 15: use `-title`/`-message` only |
 
 **Kokoro models** (download separately):
 - `kokoro-v1.0.onnx` — 310 MB
@@ -366,12 +313,9 @@ Tested and working as of February 2026:
 
 **Whisper model** — downloads automatically to `~/.cache/huggingface/` on first use.
 
-**Piper model** (optional):
-- `en_US-lessac-medium.onnx` + `.json` — ~60 MB — from HuggingFace rhasspy/piper-voices
-
 ---
 
-## 11. Streaming TTS Architecture
+## 9. Streaming TTS Architecture
 
 ### Overview
 

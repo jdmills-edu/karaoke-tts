@@ -22,13 +22,6 @@ STREAMING_WORKER_PATH = Path(__file__).parent / "streaming_worker.py"
 mcp = FastMCP("karaoke-tts")
 
 
-def notify(title: str, message: str) -> None:
-    subprocess.run(
-        ["terminal-notifier", "-title", title, "-message", message],
-        check=False,
-    )
-
-
 def load_config() -> dict:
     with open(CONFIG_PATH) as f:
         return json.load(f)
@@ -48,7 +41,6 @@ def make_output_paths(config: dict) -> tuple[Path, Path]:
 @mcp.tool()
 def generate_speech(
     text: str,
-    engine: str,
     voice: str,
     streaming: bool = True,
     output_path: str = None,
@@ -60,15 +52,14 @@ def generate_speech(
     almost immediately while synthesis continues in the background.  Streaming
     uses the Web Audio API and WebSocket to deliver audio chunk by chunk with
     estimated word timings, which are automatically refined by Whisper after
-    synthesis completes.  Streaming is only supported with the kokoro engine;
-    if engine is "piper", streaming is ignored and standard mode is used.
+    synthesis completes.
 
     In standard (non-streaming) mode, synthesis completes fully before the
     browser opens.
 
     IMPORTANT: Always call list_kokoro_voices first to show the user the
-    available voices and confirm which engine and voice to use before
-    calling this tool. engine and voice are required — do not omit them.
+    available voices and confirm which voice to use before calling this tool.
+    voice is required — do not omit it.
 
     IMPORTANT: Before passing text to this tool, rewrite it to be
     TTS-friendly. Apply ALL of the following transformations:
@@ -91,14 +82,10 @@ def generate_speech(
 
     Args:
         text: TTS-friendly text to synthesize. Any length is supported.
-        engine: TTS engine — must be "piper" or "kokoro".
-        voice: Voice identifier (required).
-               Piper: path to a .onnx model file.
-               Kokoro: voice name (e.g. "af_heart", "am_michael").
+        voice: Kokoro voice name (e.g. "af_heart", "am_michael").
         streaming: Stream audio to the browser as it is synthesized
-                   (default True). Only supported with kokoro engine;
-                   ignored for piper. Set to False for standard mode
-                   where the browser opens after synthesis completes.
+                   (default True). Set to False for standard mode where
+                   the browser opens after synthesis completes.
         output_path: Optional custom path for the OGG file.
                      The HTML player is saved alongside it automatically.
 
@@ -106,10 +93,8 @@ def generate_speech(
         Confirmation with output paths.
     """
     config = load_config()
-    if engine not in ("piper", "kokoro"):
-        raise ValueError(f"Unknown engine {engine!r}. Must be 'piper' or 'kokoro'.")
 
-    use_streaming = streaming and engine == "kokoro"
+    use_streaming = streaming
 
     if output_path:
         ogg_path = resolve(output_path)
@@ -120,7 +105,6 @@ def generate_speech(
     params_file = Path(tempfile.mktemp(suffix=".json"))
     params_file.write_text(json.dumps({
         "text": text,
-        "engine": engine,
         "voice": voice,
         "ogg_path": str(ogg_path),
         "html_path": str(html_path),
@@ -129,11 +113,6 @@ def generate_speech(
 
     venv_python = Path(__file__).parent / ".venv" / "bin" / "python"
     worker = STREAMING_WORKER_PATH if use_streaming else WORKER_PATH
-
-    if use_streaming:
-        notify("Streaming Speech…", f"{engine} · {voice} · {len(text):,} chars")
-    else:
-        notify("Generating Speech…", f"{engine} · {voice} · {len(text):,} chars")
 
     subprocess.Popen(
         [str(venv_python), str(worker), str(params_file)],
@@ -144,7 +123,7 @@ def generate_speech(
 
     if use_streaming:
         return (
-            f"Streaming speech generation started ({engine} · {voice}).\n"
+            f"Streaming speech generation started (kokoro · {voice}).\n"
             f"A browser window will open with the streaming player.\n"
             f"Audio plays immediately as each chunk is synthesized.\n\n"
             f"Archival audio:  {ogg_path}\n"
@@ -153,11 +132,8 @@ def generate_speech(
         )
 
     return (
-        f"Speech generation is running in the background ({engine} · {voice}). "
-        f"You'll receive macOS notifications at each stage:\n"
-        f"  1. Generating Speech…\n"
-        f"  2. Syncing words…\n"
-        f"  3. Karaoke Ready (browser opens automatically)\n\n"
+        f"Speech generation is running in the background (kokoro · {voice}).\n"
+        f"The browser will open automatically when the karaoke player is ready.\n\n"
         f"Audio:  {ogg_path}\n"
         f"Player: {html_path}\n\n"
         f"Do not wait or poll — let the user know it's underway."
