@@ -150,10 +150,15 @@ PLAYER_TEMPLATE = """<!DOCTYPE html>
     audio.addEventListener("loadedmetadata", () => { durEl.textContent = fmt(audio.duration); });
 
     let last = -1;
-    audio.addEventListener("timeupdate", () => {
+    let pastMark = 0;
+    function sync() {
       const t = audio.currentTime;
       fill.style.width = (t / audio.duration * 100) + "%";
       timeEl.textContent = fmt(t);
+      // Containment search: find word where start <= t < end.
+      // Micro-gaps are closed in the data so continuous speech has
+      // no dead frames.  Real pauses (commas, paragraphs) remain as
+      // gaps where idx = -1 and the highlight naturally drops.
       let lo = 0, hi = W.length - 1, idx = -1;
       while (lo <= hi) {
         const mid = (lo + hi) >> 1;
@@ -161,6 +166,14 @@ PLAYER_TEMPLATE = """<!DOCTYPE html>
         else if (W[mid].start >  t) hi = mid - 1;
         else { idx = mid; break; }
       }
+      // Sweep-mark all ended words as past (catches any that were
+      // too short to be the active match on a given frame).
+      const pastEnd = idx >= 0 ? idx : lo;
+      for (let i = pastMark; i < pastEnd; i++) {
+        spans[i].className = "w past";
+      }
+      if (pastEnd > pastMark) pastMark = pastEnd;
+
       if (idx !== last) {
         if (last >= 0) spans[last].className = "w past";
         if (idx  >= 0) {
@@ -169,10 +182,21 @@ PLAYER_TEMPLATE = """<!DOCTYPE html>
         }
         last = idx;
       }
-    });
+    }
+    // Use requestAnimationFrame (~60fps) instead of timeupdate (~4fps)
+    // so that even very short words get highlighted.
+    function rafLoop() {
+      sync();
+      if (!audio.paused) requestAnimationFrame(rafLoop);
+    }
+    audio.addEventListener("play",  () => requestAnimationFrame(rafLoop));
     document.getElementById("track").addEventListener("click", e => {
       const r = e.currentTarget.getBoundingClientRect();
       audio.currentTime = ((e.clientX - r.left) / r.width) * audio.duration;
+      last = -1;
+      pastMark = 0;
+      spans.forEach(s => s.className = "w");
+      sync();
     });
     audio.play().catch(() => {});
   </script>
@@ -204,14 +228,12 @@ def sanitize_text(text: str) -> str:
         text = text.replace(old, new)
     # Normalize line endings and tabs
     text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\t", " ")
-    # Normalize newlines: only preserve \n\n as a paragraph break when it
-    # follows sentence-ending punctuation (.!?).  All other newlines
-    # (including double newlines mid-sentence) are collapsed to spaces —
-    # they're usually hard wraps from the source, not intentional breaks.
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    text = re.sub(r"(?<=[.!?])\n\n", "\x00PARA\x00", text)  # protect real breaks
-    text = re.sub(r"\n", " ", text)                           # collapse all others
-    text = text.replace("\x00PARA\x00", "\n\n")               # restore real breaks
+    # Normalize newlines: preserve \n\n (and longer) as paragraph breaks.
+    # Single newlines are collapsed to spaces — they're usually hard wraps
+    # from the source, not intentional breaks.
+    text = re.sub(r"\n{2,}", "\x00PARA\x00", text)  # protect paragraph breaks
+    text = re.sub(r"\n", " ", text)                   # collapse single newlines
+    text = text.replace("\x00PARA\x00", "\n\n")       # restore paragraph breaks
     # Collapse multiple spaces
     text = re.sub(r" {2,}", " ", text)
     return text.strip()
@@ -296,6 +318,16 @@ def align_words(
     Returns:
         Aligned word dicts using source words with Whisper timings.
     """
+    # Identify paragraph break positions before split() discards them.
+    # break_indices records which token index starts a new paragraph.
+    paragraphs = source_text.split("\n\n")
+    break_indices: set[int] = set()
+    token_offset = 0
+    for p_idx, para in enumerate(paragraphs):
+        if p_idx > 0 and para.split():
+            break_indices.add(token_offset)
+        token_offset += len(para.split())
+
     # Tokenize source text into words (preserving order)
     src_tokens = source_text.split()
     if not src_tokens or not whisper_words:
@@ -458,6 +490,20 @@ def align_words(
             aligned[k]["start"] = 0.0
             aligned[k]["end"] = 0.2
 
+    # Stamp paragraph breaks onto the aligned words so the player can
+    # insert <br> tags at the right positions.
+    for k in break_indices:
+        if k < len(aligned):
+            aligned[k]["break"] = 2
+
+    # Close micro-gaps between consecutive words.  Small gaps (< 0.15s)
+    # are measurement artifacts from Whisper, not real pauses.  Extending
+    # end → next start makes the highlight flow without flicker.
+    for k in range(len(aligned) - 1):
+        gap = aligned[k + 1]["start"] - aligned[k]["end"]
+        if 0 < gap < 0.15:
+            aligned[k]["end"] = aligned[k + 1]["start"]
+
     if _log:
         _log(f"align: {n_src} source, {n_wh} whisper → {len(aligned)} aligned")
 
@@ -477,16 +523,27 @@ def generate_kokoro(
     kokoro = Kokoro(str(resolve(k["model_path"])), str(resolve(k["voices_path"])))
     lang, speed = k.get("lang", "en-us"), k.get("speed", 1.0)
     text = sanitize_text(text)
-    chunks = chunk_text(text)
+    # Split into paragraphs first, then chunk each paragraph individually.
+    # This lets us insert silence between paragraphs in the audio.
+    PARA_PAUSE_SEC = 0.75
+    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+    # Build a flat chunk list with markers for paragraph boundaries.
+    # Each entry is (chunk_text, starts_new_paragraph).
+    chunks_with_breaks: list[tuple[str, bool]] = []
+    for p_idx, para in enumerate(paragraphs):
+        para_chunks = chunk_text(para)
+        for c_idx, chunk in enumerate(para_chunks):
+            chunks_with_breaks.append((chunk, p_idx > 0 and c_idx == 0))
     if _log:
-        _log(f"kokoro: {len(chunks)} chunks, sizes={[len(c) for c in chunks]}")
+        _log(f"kokoro: {len(paragraphs)} paragraphs, {len(chunks_with_breaks)} chunks")
     # Stream-write each chunk directly to disk to avoid np.concatenate on a
     # large in-memory buffer, which can trigger heap corruption in the ONNX runtime.
     out_file = None
+    sr = None
     try:
-        for i, chunk in enumerate(chunks):
+        for i, (chunk, is_para_start) in enumerate(chunks_with_breaks):
             if _log:
-                _log(f"kokoro: chunk {i+1}/{len(chunks)} preview={repr(chunk[:80])}")
+                _log(f"kokoro: chunk {i+1}/{len(chunks_with_breaks)} preview={repr(chunk[:80])}")
             samples, sr = kokoro.create(chunk, voice=voice, speed=speed, lang=lang)
             if _log:
                 _log(f"kokoro: chunk {i+1} done, {len(samples)} samples")
@@ -494,6 +551,9 @@ def generate_kokoro(
                 out_file = sf.SoundFile(
                     str(out_path), mode="w", samplerate=sr, channels=1
                 )
+            if is_para_start and out_file is not None:
+                silence = np.zeros(int(sr * PARA_PAUSE_SEC), dtype=np.float32)
+                out_file.write(silence)
             out_file.write(samples)
     finally:
         if out_file is not None:
